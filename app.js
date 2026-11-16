@@ -57,7 +57,11 @@ async function ensureSeed() {
   const { data: st } = await sb.from('settings').select('*').maybeSingle();
   if (!st) await sb.from('settings').insert({});
   const { count } = await sb.from('meds').select('id', { count: 'exact', head: true });
-  if (!count) await sb.from('meds').insert(DEFAULT_MEDS);
+  if (!count) {
+    const base = { dose_options: null, weekday: null, window_label: null, note: null, track_sites: false };
+    const { error } = await sb.from('meds').insert(DEFAULT_MEDS.map((m) => ({ ...base, ...m })));
+    if (error) throw error;
+  }
 }
 
 async function saveIntake(med, day, patch) {
