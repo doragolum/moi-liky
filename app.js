@@ -17,7 +17,7 @@ const WD_FULL = ['неділя', 'понеділок', 'вівторок', 'се
 
 const S = {
   user: null, meds: [], intakes: new Map(), settings: null,
-  view: 'today', month: null, sel: null, sheet: null, toast: null, loading: true
+  view: 'today', month: null, sel: null, sheet: null, quick: null, toast: null, loading: true
 };
 
 // ---------- helpers ----------
@@ -354,6 +354,88 @@ function loginView(err = '', info = '') {
   </form>`;
 }
 
+// ---------- quick screen (opened from a notification) ----------
+const ICON_CLOCK = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+const ICON_CHECK_L = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+
+function openQuickFromUrl(href) {
+  let u; try { u = new URL(href || location.href); } catch (_) { return; }
+  const id = u.searchParams.get('q'); if (!id) return;
+  const day = u.searchParams.get('d') || todayStr();
+  const late = u.searchParams.get('f') === '1';
+  history.replaceState(null, '', location.pathname);
+  const m = S.meds.find((x) => x.id === id); if (!m) return;
+  S.sheet = null; renderSheet();
+  S.quick = { m, day, late, site: m.track_sites ? suggestSite(m) : null, done: null };
+  renderQuick();
+}
+
+function streakFor(m) {
+  let n = 0; const x = new Date(); x.setDate(x.getDate() - 1);
+  for (;;) { const r = S.intakes.get(k(m.id, ymd(x))); if (r && r.status === 'taken') { n++; x.setDate(x.getDate() - 1); } else break; }
+  return n;
+}
+
+function quickInfo(m, day) {
+  const lines = [];
+  if (/після їжі/.test(m.note || '')) {
+    const pre = daily().find((x) => /до їжі/.test(x.note || ''));
+    const pr = pre && S.intakes.get(k(pre.id, day));
+    lines.push(pr && pr.status === 'taken' ? `${pre.name} о ${timeOf(pr)} → їсти можна з ${addMin(timeOf(pr), 120)}. Спершу поїж.` : 'Спершу поїж — натщесерце краще не приймати.');
+  }
+  if (/до їжі/.test(m.note || '')) lines.push('Після відмітки покажу, з котрої можна їсти.');
+  if (m.kind === 'daily' && !/їжі/.test(m.note || '')) {
+    const y = new Date(); y.setDate(y.getDate() - 1); const r = S.intakes.get(k(m.id, ymd(y)));
+    const st = streakFor(m);
+    lines.push((r && r.status === 'taken' ? `Вчора: ${timeOf(r)}` : 'Вчора не відмічено') + (st > 1 ? ` · без пропусків ${st} дн.` : ''));
+  }
+  return lines.map((l) => `<span class="info">${esc(l)}</span>`).join('');
+}
+
+function renderQuick() {
+  const root = $('#quick-root'); const q = S.quick;
+  if (!q) { root.innerHTML = ''; return; }
+  const { m, day } = q; const r = S.intakes.get(k(m.id, day));
+  const plan = planHM(m);
+  const ban = q.late ? `Ще не відмічено · план був о ${plan}` : (day === todayStr() ? `Нагадування · план ${plan}` : fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' }));
+  let body, acts;
+  if (q.done || r) {
+    const msg = q.done || (r.status === 'skipped' ? 'Вже відмічено як пропуск' : `Вже відмічено о ${timeOf(r)}` + (r.site ? ` · ${r.site}` : ''));
+    body = `<div class="ok">${esc(msg)}</div>`;
+    acts = `<button class="p" data-a="qclose">Готово</button>${r ? '<button class="t" data-a="qmore">Змінити або скасувати</button>' : ''}`;
+  } else {
+    const chips = m.note && !m.track_sites ? `<span class="chipx">${esc(m.note[0].toUpperCase() + m.note.slice(1))}</span>` : '';
+    let sites = '';
+    if (m.track_sites) {
+      const sug = suggestSite(m); const ls = lastSite(m);
+      sites = `<div class="lbl">Місце уколу · за чергуванням: ${esc(sug.toLowerCase())}<div class="opts">${SITES.map((s) => `<button class="opt ${q.site === s ? 'on' : ''}" data-a="qsite" data-v="${esc(s)}">${esc(s)}</button>`).join('')}</div>
+        <span style="font-weight:500;font-size:12px;color:var(--muted)">${ls ? 'Минулого разу: ' + esc(ls.site) + ', ' + esc(fmtDay(ls.day, { day: 'numeric', month: 'long' })) : 'Перший укол — з нього почнеться історія місць'}</span></div>`;
+    }
+    body = chips + quickInfo(m, day) + sites;
+    const now = hm(new Date());
+    let main;
+    if (m.track_sites) main = `<button class="p" data-a="qtake">${ICON_CHECK_L}Зробила · ${esc(q.site.toLowerCase())}</button>`;
+    else if (m.dose_options?.length) main = `<span style="font-size:14px;font-weight:700;color:var(--muted2)">Прийняла зараз · ${now}:</span><div class="two">${m.dose_options.map((n) => `<button class="p" data-a="qtake" data-v="${n}">${n} таблетки</button>`).join('')}</div>`;
+    else main = `<button class="p" data-a="qtake">${ICON_CHECK_L}Прийняла зараз · ${now}</button>`;
+    acts = `${main}
+      ${day === todayStr() ? `<button class="s" data-a="qsnooze">${ICON_CLOCK}Нагадати через 15 хв</button>` : ''}
+      <div class="two"><button class="t" data-a="qskip">Пропустити</button><button class="t" data-a="qmore">Інший час / коментар</button></div>`;
+  }
+  const ico = m.track_sites ? ICON_SYR(m.color) : ICON_PILL(m.color);
+  root.innerHTML = `<div class="qk" role="dialog" aria-modal="true" aria-label="${esc(m.name)}"><div class="in">
+    <div class="top"><span class="ban ${q.late ? 'late' : ''}">${ICON_CLOCK}${esc(ban)}</span><button class="x" data-a="qclose" aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="box"><div class="hd"><span class="big" style="background:${tint(m.color)}">${ico.replace('width="24" height="24"', 'width="32" height="32"')}</span>
+      <span><div class="nm">${esc(m.name)}</div><div class="pl">План ${plan} · ${esc(m.dose_label)}</div></span></div>${body}</div>
+    <div class="acts">${acts}</div></div></div>`;
+}
+
+let quickTimer;
+function quickDone(msg) {
+  S.quick.done = msg; renderQuick();
+  clearTimeout(quickTimer);
+  quickTimer = setTimeout(() => { if (S.quick && S.quick.done === msg) { S.quick = null; renderQuick(); } }, 2500);
+}
+
 // ---------- sheet ----------
 function openSheet(medId, day) {
   const m = S.meds.find((x) => x.id === medId); if (!m) return;
@@ -401,6 +483,7 @@ function render() {
   const v = S.view === 'history' ? historyView() : S.view === 'meds' ? medsView() : todayView();
   $('#app').innerHTML = `<main class="wrap">${v}</main>${navHtml()}`;
   if (S.sheet) renderSheet();
+  if (S.quick) renderQuick();
 }
 
 // ---------- events ----------
@@ -418,6 +501,22 @@ document.addEventListener('click', async (e) => {
   else if (a === 'pick') { S.sel = el.dataset.day; render(); }
   else if (a === 'mprev' || a === 'mnext') { const m = S.month || new Date(); S.month = new Date(m.getFullYear(), m.getMonth() + (a === 'mprev' ? -1 : 1), 1); S.sel = null; render(); }
   else if (a === 'logout') { await sb.auth.signOut(); location.reload(); }
+  else if (a === 'qclose') { S.quick = null; renderQuick(); }
+  else if (a === 'qmore') { const { m, day } = S.quick; S.quick = null; renderQuick(); openSheet(m.id, day); }
+  else if (a === 'qsite') { S.quick.site = el.dataset.v; renderQuick(); }
+  else if (a === 'qtake') {
+    const { m, day } = S.quick; const now = new Date(); const dose = el.dataset.v ? Number(el.dataset.v) : null;
+    await saveIntake(m, day, { status: 'taken', taken_at: now.toISOString(), dose, site: m.track_sites ? S.quick.site : null, note: null });
+    let msg = `Відмічено о ${hm(now)}` + (dose ? ` · ${dose} таб.` : '') + (m.track_sites ? ` · ${S.quick.site}` : '');
+    if (/до їжі/.test(m.note || '')) msg += `. Їсти можна з ${addMin(hm(now), 120)}`;
+    quickDone(msg);
+  }
+  else if (a === 'qskip') { const { m, day } = S.quick; await saveIntake(m, day, { status: 'skipped', taken_at: null, dose: null, site: null, note: null }); quickDone('Записала як пропуск'); }
+  else if (a === 'qsnooze') {
+    const { m, day } = S.quick; const due = new Date(Date.now() + 15 * 60000);
+    const { error } = await sb.from('snoozes').insert({ med_id: m.id, day, due_at: due.toISOString() });
+    if (error) toast('Не вдалося: ' + error.message); else quickDone(`Нагадаю о ${hm(due)}`);
+  }
   else if (a === 'pushon') enablePush();
   else if (a === 'pushoff') disablePush();
   else if (a === 'pushtoggle') updateSettings({ notify_push: !S.settings.notify_push });
@@ -465,7 +564,14 @@ document.addEventListener('submit', async (e) => {
   if (error) $('#app').innerHTML = loginView(/confirm/i.test(error.message) ? 'Пошту ще не підтверджено — відкрий лист від Supabase.' : 'Неправильний email або пароль.');
 });
 
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && S.sheet) { S.sheet = null; renderSheet(); } });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (S.sheet) { S.sheet = null; renderSheet(); } else if (S.quick) { S.quick = null; renderQuick(); }
+});
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', async (e) => {
+  if (e.data?.type !== 'open-quick' || !S.user) return;
+  lastLoad = 0; await refresh(); openQuickFromUrl(e.data.url);
+});
 
 // refresh when returning to the app (e.g. after answering in Telegram)
 let lastLoad = 0;
@@ -481,7 +587,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && !S.sheet) rend
 async function boot(session) {
   S.user = session?.user || null;
   if (!S.user) { $('#app').innerHTML = loginView(); return; }
-  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); }
+  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); openQuickFromUrl(); }
   catch (err) { $('#app').innerHTML = `<div class="login"><h1>Ой</h1><p>Не вдалося завантажити дані. Перевір інтернет і онови сторінку.</p><p class="err">${esc(err.message || err)}</p></div>`; }
 }
 

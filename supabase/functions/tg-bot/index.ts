@@ -45,7 +45,7 @@ function pushPayload(m: Med, day: string, followup: boolean) {
     title: followup ? `Ще не відмічено: ${m.name}` : `${m.name} · ${plan}`,
     body: followup ? `План був о ${plan}. Натисни, щоб відмітити.` : `${m.dose_label}${m.note ? " · " + m.note : ""}`,
     tag: `${m.id}|${day}`,
-    url: APP_URL,
+    url: `${APP_URL}?q=${m.id}&d=${day}${followup ? "&f=1" : ""}`,
   };
 }
 
@@ -270,6 +270,13 @@ Deno.serve(async (req) => {
       const { data } = await sb.from("push_subscriptions").select("id, endpoint, p256dh, auth");
       const n = await pushTo(data ?? [], { title: "Мої ліки", body: "Тестове сповіщення — усе працює.", tag: "test", url: APP_URL });
       return Response.json({ subs: data?.length ?? 0, delivered: n });
+    }
+    if (action === "testquick") {
+      const { data: m } = await sb.from("meds").select("*").eq("name", url.searchParams.get("name") ?? "").maybeSingle();
+      const { data } = await sb.from("push_subscriptions").select("id, endpoint, p256dh, auth");
+      if (!m) return Response.json({ error: "no med" });
+      const n = await pushTo(data ?? [], pushPayload(m as Med, local("Europe/Amsterdam").day, false));
+      return Response.json({ delivered: n });
     }
     if (action === "setup") {
       const me = await tg("getMe", {});
