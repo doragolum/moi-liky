@@ -1,6 +1,6 @@
 // Простий service worker: оболонка додатку з кешу, щоб відкривався миттєво.
 // Дані завжди беруться з мережі (Supabase).
-const CACHE = 'moi-liky-v3';
+const CACHE = 'moi-liky-v4';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
