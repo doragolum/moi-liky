@@ -1,6 +1,6 @@
 // Простий service worker: оболонка додатку з кешу, щоб відкривався миттєво.
 // Дані завжди беруться з мережі (Supabase).
-const CACHE = 'moi-liky-v6';
+const CACHE = 'moi-liky-v7';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
@@ -21,12 +21,15 @@ self.addEventListener('push', (e) => {
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   const url = new URL(e.notification.data?.url || './', self.registration.scope).href;
-  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (cs) => {
-    for (const c of cs) {
-      if ('focus' in c) { c.postMessage({ type: 'open-quick', url }); return c.focus(); }
-    }
-    return self.clients.openWindow(url);
-  }));
+  e.waitUntil((async () => {
+    // запамʼятати, що треба відкрити (додаток перевірить це, коли стане видимим)
+    try { const c = await caches.open('moi-liky-pending'); await c.put('pending-quick', new Response(url)); } catch (_) {}
+    const cs = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of cs) c.postMessage({ type: 'open-quick', url });
+    // iOS надійніше відкриває додаток через openWindow, ніж через focus()
+    try { const w = await self.clients.openWindow(url); if (w) return; } catch (_) {}
+    for (const c of cs) { try { await c.focus(); return; } catch (_) {} }
+  })());
 });
 
 self.addEventListener('fetch', (e) => {

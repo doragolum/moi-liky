@@ -568,10 +568,21 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (S.sheet) { S.sheet = null; renderSheet(); } else if (S.quick) { S.quick = null; renderQuick(); }
 });
-if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', async (e) => {
-  if (e.data?.type !== 'open-quick' || !S.user) return;
-  lastLoad = 0; await refresh(); openQuickFromUrl(e.data.url);
+async function takePending() {
+  try {
+    const c = await caches.open('moi-liky-pending'); const r = await c.match('pending-quick');
+    if (!r) return null; const url = await r.text(); await c.delete('pending-quick'); return url;
+  } catch (_) { return null; }
+}
+async function checkPendingQuick() {
+  if (!S.user) return;
+  const url = await takePending(); if (!url) return;
+  lastLoad = 0; await refresh(); openQuickFromUrl(url);
+}
+if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => {
+  if (e.data?.type === 'open-quick') checkPendingQuick();
 });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkPendingQuick(); });
 
 // refresh when returning to the app (e.g. after answering in Telegram)
 let lastLoad = 0;
@@ -587,7 +598,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && !S.sheet) rend
 async function boot(session) {
   S.user = session?.user || null;
   if (!S.user) { $('#app').innerHTML = loginView(); return; }
-  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); openQuickFromUrl(); }
+  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); if (new URL(location.href).searchParams.get('q')) { await takePending(); openQuickFromUrl(); } else checkPendingQuick(); }
   catch (err) { $('#app').innerHTML = `<div class="login"><h1>Ой</h1><p>Не вдалося завантажити дані. Перевір інтернет і онови сторінку.</p><p class="err">${esc(err.message || err)}</p></div>`; }
 }
 
