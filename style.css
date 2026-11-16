@@ -136,6 +136,9 @@ textarea{resize:none}
 .login h1{margin:0;font-size:30px;font-weight:800;letter-spacing:-.02em}
 .login p{margin:0;color:var(--muted2);font-size:15px}
 .err{color:#b42318;font-size:14px;font-weight:600}
+.seg{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;border-radius:16px;background:#e9e5f7}
+.seg button{min-height:42px;border:0;border-radius:12px;background:transparent;font-size:15px;font-weight:700;color:var(--muted2)}
+.seg button.on{background:#fff;color:var(--accent-ink);box-shadow:0 1px 3px rgba(31,29,43,.1)}
 
 @keyframes up{from{transform:translateY(16px);opacity:0}to{transform:none;opacity:1}}
 .toast{animation:none}

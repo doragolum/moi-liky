@@ -273,14 +273,20 @@ function navHtml() {
     ${b('meds', 'Мої ліки', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>')}</nav>`;
 }
 
+let loginMode = 'in'; // 'in' | 'up'
 function loginView(err = '', info = '') {
+  const up = loginMode === 'up';
   return `<form class="login" data-form="login">
-    <h1>Мої ліки</h1><p>Увійди один раз — телефон запамʼятає.</p>
+    <h1>Мої ліки</h1><p>${up ? 'Створи акаунт — це потрібно лише один раз.' : 'Увійди один раз — телефон запамʼятає.'}</p>
+    <div class="seg" role="tablist">
+      <button type="button" role="tab" aria-selected="${!up}" class="${up ? '' : 'on'}" data-a="lmode" data-v="in">Вхід</button>
+      <button type="button" role="tab" aria-selected="${up}" class="${up ? 'on' : ''}" data-a="lmode" data-v="up">Новий акаунт</button>
+    </div>
     <label class="lbl">Email<input type="email" name="email" autocomplete="email" required value="${esc(CONFIG.ownerEmail || '')}"></label>
-    <label class="lbl">Пароль<input type="password" name="password" autocomplete="current-password" minlength="6" required></label>
+    <label class="lbl">${up ? 'Придумай пароль (від 6 символів)' : 'Пароль'}<input type="password" name="password" autocomplete="${up ? 'new-password' : 'current-password'}" minlength="6" required></label>
+    ${up ? '<label class="lbl">Повтори пароль<input type="password" name="password2" autocomplete="new-password" minlength="6" required></label>' : ''}
     ${err ? `<div class="err">${esc(err)}</div>` : ''}${info ? `<p>${esc(info)}</p>` : ''}
-    <button class="btn" type="submit">Увійти</button>
-    <button class="btn link" type="button" data-a="signup">Перший раз? Створити акаунт з цим паролем</button>
+    <button class="btn" type="submit">${up ? 'Створити акаунт' : 'Увійти'}</button>
   </form>`;
 }
 
@@ -348,13 +354,7 @@ document.addEventListener('click', async (e) => {
   else if (a === 'pick') { S.sel = el.dataset.day; render(); }
   else if (a === 'mprev' || a === 'mnext') { const m = S.month || new Date(); S.month = new Date(m.getFullYear(), m.getMonth() + (a === 'mprev' ? -1 : 1), 1); S.sel = null; render(); }
   else if (a === 'logout') { await sb.auth.signOut(); location.reload(); }
-  else if (a === 'signup') {
-    const f = el.closest('form'); const email = f.email.value.trim(); const password = f.password.value;
-    if (password.length < 6) { $('#app').innerHTML = loginView('Пароль — щонайменше 6 символів'); return; }
-    const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
-    if (error) $('#app').innerHTML = loginView('Не вдалося: ' + error.message);
-    else if (!data.session) $('#app').innerHTML = loginView('', 'Акаунт створено. Підтверди пошту (лист від Supabase) або напиши Claude, щоб він підтвердив вручну, — потім увійди.');
-  }
+  else if (a === 'lmode') { loginMode = el.dataset.v; $('#app').innerHTML = loginView(); }
   else if (!sh) return;
   else if (a === 'sclose') { S.sheet = null; renderSheet(); }
   else if (a === 'sedit') { sh.edit = true; renderSheet(); }
@@ -384,9 +384,17 @@ document.addEventListener('input', (e) => {
 document.addEventListener('submit', async (e) => {
   if (e.target.dataset.form !== 'login') return;
   e.preventDefault();
-  const f = e.target;
-  const { error } = await sb.auth.signInWithPassword({ email: f.email.value.trim(), password: f.password.value });
-  if (error) $('#app').innerHTML = loginView(/confirm/i.test(error.message) ? 'Пошту ще не підтверджено.' : 'Неправильний email або пароль.');
+  const f = e.target; const email = f.email.value.trim(); const password = f.password.value;
+  const btn = f.querySelector('button[type=submit]'); btn.disabled = true; btn.textContent = 'Зачекай…';
+  if (loginMode === 'up') {
+    if (password !== f.password2.value) { $('#app').innerHTML = loginView('Паролі не збігаються'); return; }
+    const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
+    if (error) { $('#app').innerHTML = loginView(/registered/i.test(error.message) ? 'Такий акаунт уже є — перейди на «Вхід».' : 'Не вдалося: ' + error.message); return; }
+    if (!data.session) { loginMode = 'in'; $('#app').innerHTML = loginView('', 'Акаунт створено. Підтверди пошту за посиланням у листі (сторінка після нього може не відкритися — це нормально), потім увійди тут.'); }
+    return;
+  }
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) $('#app').innerHTML = loginView(/confirm/i.test(error.message) ? 'Пошту ще не підтверджено — відкрий лист від Supabase.' : 'Неправильний email або пароль.');
 });
 
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && S.sheet) { S.sheet = null; renderSheet(); } });
