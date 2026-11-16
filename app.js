@@ -1,0 +1,419 @@
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+import { CONFIG } from './config.js';
+
+const sb = createClient(CONFIG.supabaseUrl, CONFIG.supabaseKey, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+});
+
+const DEFAULT_MEDS = [
+  { name: 'Глікопіроніум', dose_label: '2–3 таблетки', dose_options: [2, 3], kind: 'daily', plan_time: '09:30', window_label: '9:00–10:00', note: 'за 2 год до їжі', color: '#e6a700', sort: 1 },
+  { name: 'Золофт', dose_label: '2 × 50 мг', kind: 'daily', plan_time: '11:00', note: 'після їжі', color: '#3fa3e0', sort: 2 },
+  { name: 'Лактінет', dose_label: '1 таблетка', kind: 'daily', plan_time: '22:00', note: 'щодня в один час', color: '#e66aa8', sort: 3 },
+  { name: 'Мунджаро', dose_label: '1 укол', kind: 'weekly', weekday: 6, plan_time: '22:00', note: 'ін’єкція', color: '#6c5ce7', track_sites: true, sort: 4 }
+];
+const SITES = ['Живіт ліворуч', 'Живіт праворуч', 'Стегно ліве', 'Стегно праве', 'Плече ліве', 'Плече праве'];
+const WD = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'];
+const WD_FULL = ['неділя', 'понеділок', 'вівторок', 'середа', 'четвер', 'пʼятниця', 'субота'];
+
+const S = {
+  user: null, meds: [], intakes: new Map(), settings: null,
+  view: 'today', month: null, sel: null, sheet: null, toast: null, loading: true
+};
+
+// ---------- helpers ----------
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = (n) => String(n).padStart(2, '0');
+const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const hm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const todayStr = () => ymd(new Date());
+const addMin = (hhmm, mins) => { const [h, m] = hhmm.split(':').map(Number); const x = new Date(); x.setHours(h, m + mins, 0, 0); return hm(x); };
+const k = (medId, day) => `${medId}|${day}`;
+const daily = () => S.meds.filter((m) => m.kind === 'daily' && m.active);
+const weekly = () => S.meds.filter((m) => m.kind === 'weekly' && m.active);
+const planHM = (m) => (m.plan_time || '').slice(0, 5);
+const fmtDay = (s, opts) => parseYmd(s).toLocaleDateString('uk-UA', opts);
+
+const ICON_PILL = (c) => `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 20.5 3.5 13.5a5 5 0 0 1 7-7l7 7a5 5 0 0 1-7 7Z"/><path d="m8.5 8.5 7 7"/></svg>`;
+const ICON_SYR = (c) => `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/><path d="m14 4 6 6"/></svg>`;
+const ICON_CHECK = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
+const tint = (hex) => hex + '22';
+
+// ---------- data ----------
+async function loadAll() {
+  const [{ data: meds, error: e1 }, { data: ints, error: e2 }, { data: st }] = await Promise.all([
+    sb.from('meds').select('*').order('sort'),
+    sb.from('intakes').select('*').order('day', { ascending: false }).limit(3000),
+    sb.from('settings').select('*').maybeSingle()
+  ]);
+  if (e1 || e2) throw e1 || e2;
+  S.meds = meds || [];
+  S.intakes = new Map((ints || []).map((r) => [k(r.med_id, r.day), r]));
+  S.settings = st;
+}
+
+async function ensureSeed() {
+  const { data: st } = await sb.from('settings').select('*').maybeSingle();
+  if (!st) await sb.from('settings').insert({});
+  const { count } = await sb.from('meds').select('id', { count: 'exact', head: true });
+  if (!count) await sb.from('meds').insert(DEFAULT_MEDS);
+}
+
+async function saveIntake(med, day, patch) {
+  const row = { med_id: med.id, day, source: 'app', ...patch };
+  const prev = S.intakes.get(k(med.id, day));
+  S.intakes.set(k(med.id, day), { ...(prev || {}), ...row });
+  render();
+  const { data, error } = await sb.from('intakes').upsert(row, { onConflict: 'med_id,day' }).select().single();
+  if (error) { toast('Не вдалося зберегти: ' + error.message); if (prev) S.intakes.set(k(med.id, day), prev); else S.intakes.delete(k(med.id, day)); render(); return; }
+  S.intakes.set(k(med.id, day), data);
+  render();
+}
+
+async function deleteIntake(med, day) {
+  const prev = S.intakes.get(k(med.id, day));
+  S.intakes.delete(k(med.id, day));
+  render();
+  const { error } = await sb.from('intakes').delete().eq('med_id', med.id).eq('day', day);
+  if (error) { toast('Не вдалося скасувати'); if (prev) S.intakes.set(k(med.id, day), prev); render(); }
+  return prev;
+}
+
+function takenAtFor(day, hhmm) {
+  const d = parseYmd(day); const [h, m] = hhmm.split(':').map(Number); d.setHours(h, m, 0, 0); return d.toISOString();
+}
+const timeOf = (r) => r && r.taken_at ? hm(new Date(r.taken_at)) : '';
+
+function lastSite(med) {
+  let best = null;
+  for (const r of S.intakes.values()) if (r.med_id === med.id && r.site && r.status === 'taken' && (!best || r.day > best.day)) best = r;
+  return best;
+}
+function suggestSite(med) { const l = lastSite(med); return SITES[(l ? SITES.indexOf(l.site) + 1 : 0) % SITES.length]; }
+
+function dayStatus(day) {
+  const ms = daily(); let t = 0, any = 0;
+  for (const m of ms) { const r = S.intakes.get(k(m.id, day)); if (r) { any++; if (r.status === 'taken') t++; } }
+  return { t, any, n: ms.length };
+}
+
+function startDay() {
+  const c = S.settings?.created_at ? ymd(new Date(S.settings.created_at)) : todayStr();
+  let first = c;
+  for (const r of S.intakes.values()) if (r.day < first) first = r.day;
+  return first;
+}
+
+// ---------- toast ----------
+let toastTimer;
+function toast(text, undo) {
+  clearTimeout(toastTimer);
+  S.toast = { text, undo };
+  renderToast();
+  toastTimer = setTimeout(() => { S.toast = null; renderToast(); }, 4000);
+}
+function renderToast() {
+  const t = S.toast;
+  $('#toast-root').innerHTML = t ? `<div class="toast" role="status"><span>${esc(t.text)}</span>${t.undo ? '<button data-a="undo">Скасувати</button>' : ''}</div>` : '';
+}
+
+// ---------- views ----------
+function headerHtml() {
+  const d = new Date(); const h = d.getHours();
+  const today = todayStr(); const st = dayStatus(today);
+  const greet = h < 5 ? 'Доброї ночі' : h < 12 ? 'Доброго ранку' : h < 18 ? 'Добрий день' : 'Добрий вечір';
+  const left = st.n - st.any;
+  const sum = left === 0 ? 'На сьогодні все відмічено' : `Залишилось: ${left}`;
+  const off = (213.6 * (1 - (st.n ? st.any / st.n : 0))).toFixed(1);
+  return `<header class="head">
+    <div><div class="date">${esc(d.toLocaleDateString('uk-UA', { weekday: 'long', day: 'numeric', month: 'long' }))}</div>
+    <h1>${greet}</h1><div class="sum">${sum}</div></div>
+    <div class="ring" aria-label="Відмічено ${st.any} з ${st.n}"><svg width="80" height="80" viewBox="0 0 84 84" aria-hidden="true">
+      <circle cx="42" cy="42" r="34" fill="none" stroke="#e3ddf6" stroke-width="10"/>
+      <circle cx="42" cy="42" r="34" fill="none" stroke="#6c5ce7" stroke-width="10" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="${off}" transform="rotate(-90 42 42)"/>
+    </svg><span>${st.any}/${st.n}</span></div></header>`;
+}
+
+function weekHtml() {
+  const d = new Date(); const dow = (d.getDay() + 6) % 7; const today = todayStr(); const first = startDay();
+  return `<div class="week">` + WD.map((l, i) => {
+    const x = new Date(d); x.setDate(d.getDate() - dow + i); const s = ymd(x);
+    const st = dayStatus(s); let dot = 'transparent';
+    if (s < today && s >= first) dot = st.t === st.n ? '#1f8a5b' : st.any ? '#f2b544' : '#f0a58f';
+    if (s === today) dot = st.t === st.n ? '#1f8a5b' : st.any ? '#f2b544' : '#c9c2dd';
+    return `<div class="wd ${s === today ? 'today' : ''}"><span class="l">${l}</span><span class="n">${x.getDate()}</span><span class="dot" style="background:${dot}"></span></div>`;
+  }).join('') + `</div>`;
+}
+
+function medCardHtml(m) {
+  const today = todayStr(); const r = S.intakes.get(k(m.id, today));
+  const taken = r && r.status === 'taken'; const skipped = r && r.status === 'skipped';
+  let sub = `${m.dose_label} · ${m.window_label || planHM(m)}${m.note ? ' · ' + m.note : ''}`;
+  let hint = '', hintOk = false;
+  if (taken) {
+    sub = (m.dose_options?.length && r.dose ? `${r.dose} таблетки` : m.dose_label) + (r.note ? ' · ' + r.note : '');
+    if (/до їжі/.test(m.note || '')) { hint = 'Їсти можна з ' + addMin(timeOf(r), 120); hintOk = true; }
+  } else if (skipped) {
+    sub = 'Пропущено' + (r.note ? ' · ' + r.note : '');
+  } else if (/після їжі/.test(m.note || '')) {
+    const pre = daily().find((x) => /до їжі/.test(x.note || ''));
+    const pr = pre && S.intakes.get(k(pre.id, today));
+    hint = pr && pr.status === 'taken' ? `Спершу поїсти (можна з ${addMin(timeOf(pr), 120)})` : 'Спершу поїсти';
+  }
+  const right = taken ? `<span class="chip ok">${ICON_CHECK}${timeOf(r)}</span>`
+    : skipped ? `<span class="chip skip">Пропуск</span>`
+    : `<button class="btn-quick" data-a="quick" data-id="${m.id}" aria-label="Відмітити ${esc(m.name)} зараз">Прийняла</button>`;
+  return `<div class="card ${taken ? 'taken' : skipped ? 'skipped' : ''}">
+    <button class="main" data-a="open" data-id="${m.id}" data-day="${today}" aria-label="Деталі: ${esc(m.name)}">
+      <span class="ico" style="background:${tint(m.color)}">${ICON_PILL(m.color)}</span>
+      <span class="txt"><span class="nm">${esc(m.name)}</span><span class="sb">${esc(sub)}</span>${hint ? `<span class="hint ${hintOk ? 'ok' : ''}">${esc(hint)}</span>` : ''}</span>
+    </button>${right}</div>`;
+}
+
+function nextWeeklyDate(m) {
+  const d = new Date(); const until = (m.weekday - d.getDay() + 7) % 7; const x = new Date(d); x.setDate(d.getDate() + until); return { day: ymd(x), until };
+}
+function lastIntake(m) {
+  let best = null; for (const r of S.intakes.values()) if (r.med_id === m.id && r.status === 'taken' && (!best || r.day > best.day)) best = r; return best;
+}
+
+function injHtml(m) {
+  const today = todayStr(); const r = S.intakes.get(k(m.id, today));
+  const { day, until } = nextWeeklyDate(m);
+  const done = r && r.status === 'taken';
+  let sub, site;
+  if (done) { sub = `Зроблено сьогодні о ${timeOf(r)}`; site = r.site || ''; }
+  else {
+    const when = until === 0 ? 'сьогодні' : until === 1 ? 'завтра' : fmtDay(day, { day: 'numeric', month: 'long' });
+    sub = `${WD_FULL[m.weekday][0].toUpperCase() + WD_FULL[m.weekday].slice(1)}, ${planHM(m)} · ${when}`;
+    site = m.track_sites ? 'Наступне місце: ' + suggestSite(m).toLowerCase() : '';
+  }
+  return `<div class="inj"><span class="ico">${ICON_SYR('#d8cffc')}</span>
+    <span class="txt" style="flex:1"><span class="nm">${esc(m.name)}</span><span class="sb">${esc(sub)}</span>${site ? `<span class="site">${esc(site)}</span>` : ''}</span>
+    <button class="act ${done ? 'done' : ''}" data-a="open" data-id="${m.id}" data-day="${today}">${done ? 'Деталі' : 'Відмітити'}</button></div>`;
+}
+
+function todayView() {
+  return headerHtml() + weekHtml() +
+    `<div class="sec"><h2>Сьогодні</h2><span class="tip">Картка — деталі, кнопка — швидко</span></div>
+     <div class="list">${daily().map(medCardHtml).join('')}</div>` + weekly().map(injHtml).join('');
+}
+
+function historyView() {
+  const today = todayStr(); const first = startDay();
+  const m0 = S.month || new Date(); const y = m0.getFullYear(), mo = m0.getMonth();
+  const lead = (new Date(y, mo, 1).getDay() + 6) % 7; const days = new Date(y, mo + 1, 0).getDate();
+  const sel = S.sel || today; const ds = daily(); const ws = weekly();
+  let ok = 0, all = 0; const cells = [];
+  for (let i = 0; i < lead; i++) cells.push('<span></span>');
+  for (let n = 1; n <= days; n++) {
+    const s = `${y}-${pad(mo + 1)}-${pad(n)}`; const dow = new Date(y, mo, n).getDay();
+    const inRange = s >= first && s <= today;
+    const dots = ds.map((m) => {
+      if (!inRange) return 'transparent';
+      const r = S.intakes.get(k(m.id, s));
+      if (r) return r.status === 'taken' ? m.color : '#b9b3c9';
+      return s === today ? '#d9d4e3' : '#f0a58f';
+    });
+    if (inRange && s < today) for (const m of ds) { all++; const r = S.intakes.get(k(m.id, s)); if (r && r.status === 'taken') ok++; }
+    const injDone = ws.some((m) => { const r = S.intakes.get(k(m.id, s)); return r && r.status === 'taken'; });
+    const injPlan = ws.some((m) => m.weekday === dow) && s >= today;
+    const cls = ['cell', s === today ? 'today' : s < today ? 'past' : 'future', s === sel && s !== today ? 'sel' : '', injDone ? 'inj' : injPlan ? 'injplan' : ''].join(' ');
+    cells.push(`<button class="${cls}" data-a="pick" data-day="${s}" ${s > today ? 'disabled' : ''} aria-label="${n} число"><span class="n">${n}</span><span class="ds">${dots.map((c) => `<i style="background:${c}"></i>`).join('')}</span></button>`);
+  }
+  // streak
+  let streak = 0; { const x = new Date(); if (dayStatus(today).t !== ds.length) x.setDate(x.getDate() - 1);
+    while (ymd(x) >= first) { const st = dayStatus(ymd(x)); if (st.t === st.n && st.n) { streak++; x.setDate(x.getDate() - 1); } else break; } }
+  const stat = all ? `${Math.round(ok / all * 100)}% · серія ${streak} дн.` : (streak ? `Серія ${streak} дн.` : 'Початок 🌱'.replace('🌱', '').trim());
+
+  const selDow = parseYmd(sel).getDay();
+  const rows = [...ds, ...ws.filter((m) => m.weekday === selDow || S.intakes.get(k(m.id, sel)))].map((m) => {
+    const r = S.intakes.get(k(m.id, sel));
+    let st, col;
+    if (r && r.status === 'taken') { st = timeOf(r) + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : ''); col = '#c6f36b'; }
+    else if (r) { st = 'пропуск'; col = '#d4cfe6'; }
+    else { st = sel === today ? 'ще ні' : 'не відмічено'; col = sel === today ? '#d4cfe6' : '#ffb4a2'; }
+    return `<button class="drow" data-a="open" data-id="${m.id}" data-day="${sel}"><span class="r"><i style="background:${m.color}"></i><span class="f">${esc(m.name)}</span><b style="color:${col}">${esc(st)}</b></span>${r && r.note ? `<span class="nt">${esc(r.note)}</span>` : ''}</button>`;
+  }).join('');
+  const isCur = y === new Date().getFullYear() && mo === new Date().getMonth();
+
+  return headerHtml() +
+    `<div class="sec"><div class="mnav"><button data-a="mprev" aria-label="Попередній місяць"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+       <h2>${esc(new Date(y, mo, 1).toLocaleDateString('uk-UA', { month: 'long', year: 'numeric' }))}</h2>
+       ${isCur ? '' : '<button data-a="mnext" aria-label="Наступний місяць"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>'}</div>
+       <span class="stat">${esc(stat)}</span></div>
+     <div class="cal"><div class="hd">${WD.map((w) => `<span>${w}</span>`).join('')}</div><div class="gr">${cells.join('')}</div>
+       <div class="legend">${ds.map((m) => `<span><i style="background:${m.color}"></i>${esc(m.name)}</span>`).join('')}
+       <span><i style="background:#b9b3c9"></i>пропуск</span><span><i style="background:#f0a58f"></i>не відмічено</span>${ws.length ? '<span><i class="sq"></i>укол</span>' : ''}</div></div>
+     <div class="detail"><span class="t">${sel === today ? 'Сьогодні, ' : ''}${esc(fmtDay(sel, { weekday: 'long', day: 'numeric', month: 'long' }))}</span>${rows}
+       <span class="help">Натисни на рядок, щоб відмітити або змінити.</span></div>`;
+}
+
+function medsView() {
+  const st = S.settings;
+  const linked = !!st?.telegram_chat_id;
+  const botLink = CONFIG.botUsername && st?.link_code ? `https://t.me/${CONFIG.botUsername}?start=${st.link_code}` : '';
+  const list = S.meds.map((m) => `<div class="mrow"><i style="background:${m.color}"></i><span class="f"><b>${esc(m.name)}</b><small>${esc(m.dose_label)} · ${m.kind === 'weekly' ? WD_FULL[m.weekday] + ', ' : 'щодня, '}${planHM(m)}${m.note ? ' · ' + esc(m.note) : ''}</small><small>Нагадування за ${m.remind_before_min} хв, повтор через ${m.followup_after_min} хв, якщо не відмічено</small></span></div>`).join('');
+  return `<header class="head"><div><div class="date">Налаштування</div><h1>Мої ліки</h1></div></header>
+    <div class="panel"><h3>Розклад</h3>${list}</div>
+    <div class="panel"><h3>Telegram</h3>
+      ${linked ? '<p>Підключено. Нагадування приходять у бот, а кнопки в повідомленнях одразу відмічають прийом тут.</p>'
+        : botLink ? `<p>Натисни кнопку, відкриється бот — натисни «Start». Після цього нагадування почнуть приходити.</p><a class="btn" href="${botLink}" target="_blank" rel="noopener">Підключити Telegram</a>`
+        : '<p>Бот ще налаштовується.</p>'}
+    </div>
+    <div class="panel"><h3>На головний екран</h3><p>iPhone: Safari → «Поділитися» → «На екран „Додому“». Android: Chrome → ⋮ → «Додати на головний екран».</p></div>
+    <div class="panel"><button class="btn ghost" data-a="logout">Вийти з акаунта</button></div>`;
+}
+
+function navHtml() {
+  const b = (v, label, svg) => `<button class="${S.view === v ? 'on' : ''}" data-a="nav" data-v="${v}">${svg}${label}</button>`;
+  return `<nav class="nav">${b('today', 'Сьогодні', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>')}
+    ${b('history', 'Історія', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>')}
+    ${b('meds', 'Мої ліки', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>')}</nav>`;
+}
+
+function loginView(err = '', info = '') {
+  return `<form class="login" data-form="login">
+    <h1>Мої ліки</h1><p>Увійди один раз — телефон запамʼятає.</p>
+    <label class="lbl">Email<input type="email" name="email" autocomplete="email" required value="${esc(CONFIG.ownerEmail || '')}"></label>
+    <label class="lbl">Пароль<input type="password" name="password" autocomplete="current-password" minlength="6" required></label>
+    ${err ? `<div class="err">${esc(err)}</div>` : ''}${info ? `<p>${esc(info)}</p>` : ''}
+    <button class="btn" type="submit">Увійти</button>
+    <button class="btn link" type="button" data-a="signup">Перший раз? Створити акаунт з цим паролем</button>
+  </form>`;
+}
+
+// ---------- sheet ----------
+function openSheet(medId, day) {
+  const m = S.meds.find((x) => x.id === medId); if (!m) return;
+  const today = todayStr();
+  S.sheet = { m, day, edit: false, mode: day === today ? 'now' : 'custom', time: day === today ? hm(new Date()) : planHM(m),
+    dose: m.dose_options?.[0] ?? null, site: m.track_sites ? suggestSite(m) : null, note: '' };
+  const r = S.intakes.get(k(m.id, day));
+  if (r) { S.sheet.note = r.note || ''; if (r.dose) S.sheet.dose = r.dose; if (r.site) S.sheet.site = r.site; if (r.taken_at) { S.sheet.time = timeOf(r); S.sheet.mode = 'custom'; } }
+  renderSheet();
+}
+
+function renderSheet() {
+  const sh = S.sheet; const root = $('#sheet-root');
+  if (!sh) { root.innerHTML = ''; return; }
+  const { m, day } = sh; const today = todayStr();
+  const r = S.intakes.get(k(m.id, day));
+  const dayLbl = day === today ? 'сьогодні' : fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' });
+  let body;
+  if (r && !sh.edit) {
+    const t = r.status === 'skipped' ? 'Відмічено як пропуск' : `Відмічено о ${timeOf(r)}` + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : '');
+    body = `<div class="done-box ${r.status === 'skipped' ? 'skip' : ''}">${esc(t)}${r.note ? '<br>' + esc(r.note) : ''}${r.source === 'telegram' ? '<br><small>через Telegram</small>' : ''}</div>
+      <button class="btn ghost" data-a="sedit">Змінити</button>
+      <button class="btn link" data-a="sdel">Скасувати відмітку</button>`;
+  } else {
+    const doses = m.dose_options?.length ? `<div class="lbl">Скільки таблеток<div class="opts">${m.dose_options.map((n) => `<button class="opt ${sh.dose === n ? 'on' : ''}" data-a="sdose" data-v="${n}">${n} таблетки</button>`).join('')}</div></div>` : '';
+    const sug = m.track_sites ? suggestSite(m) : null; const ls = m.track_sites ? lastSite(m) : null;
+    const sites = m.track_sites ? `<div class="lbl">Місце уколу<div class="opts">${SITES.map((s) => `<button class="opt ${sh.site === s ? 'on' : ''}" data-a="ssite" data-v="${esc(s)}">${esc(s)}${s === sug ? '<small>за чергуванням</small>' : ''}</button>`).join('')}</div>
+      <span style="font-weight:500;font-size:12px;color:var(--muted)">${ls ? 'Минулого разу: ' + esc(ls.site) + ', ' + esc(fmtDay(ls.day, { day: 'numeric', month: 'long' })) : 'Перший укол — з нього почнеться історія місць'}</span></div>` : '';
+    const timeSel = day === today
+      ? `<div class="opts"><button class="opt ${sh.mode === 'now' ? 'on' : ''}" data-a="smode" data-v="now">Зараз · ${hm(new Date())}</button><button class="opt ${sh.mode === 'custom' ? 'on' : ''}" data-a="smode" data-v="custom">Вказати час</button></div>` : '';
+    const timeIn = sh.mode === 'custom' ? `<label class="row">Коли<input type="time" data-in="time" value="${esc(sh.time)}"></label>` : '';
+    const tShow = sh.mode === 'now' ? hm(new Date()) : sh.time;
+    body = `${doses}${sites}${timeSel}${timeIn}
+      <label class="lbl">Коментар (не обовʼязково)<textarea rows="2" data-in="note" placeholder="Наприклад: поїла раніше, нудило…">${esc(sh.note)}</textarea></label>
+      <button class="btn" data-a="ssave">${m.track_sites ? 'Відмітити укол' : 'Прийняла'} · ${tShow}</button>
+      <button class="btn link" data-a="sskip">${day === today ? 'Пропускаю сьогодні' : 'Відмітити як пропуск'}</button>`;
+  }
+  root.innerHTML = `<div class="ov" role="dialog" aria-modal="true" aria-label="${esc(m.name)}"><button class="bg" data-a="sclose" aria-label="Закрити"></button>
+    <div class="sh"><span class="grab"></span><div><div class="ttl">${esc(m.name)}</div><div class="sub">${esc(m.dose_label)} · ${esc(dayLbl)} · план ${planHM(m)}${m.note ? ' · ' + esc(m.note) : ''}</div></div>${body}</div></div>`;
+}
+
+// ---------- render ----------
+function render() {
+  if (!S.user) return;
+  const v = S.view === 'history' ? historyView() : S.view === 'meds' ? medsView() : todayView();
+  $('#app').innerHTML = `<main class="wrap">${v}</main>${navHtml()}`;
+  if (S.sheet) renderSheet();
+}
+
+// ---------- events ----------
+document.addEventListener('click', async (e) => {
+  const el = e.target.closest('[data-a]'); if (!el) return;
+  const a = el.dataset.a; const sh = S.sheet;
+  if (a === 'nav') { S.view = el.dataset.v; if (S.view === 'history') { S.sel = null; S.month = null; } render(); window.scrollTo(0, 0); }
+  else if (a === 'open') openSheet(el.dataset.id, el.dataset.day);
+  else if (a === 'quick') {
+    const m = S.meds.find((x) => x.id === el.dataset.id); const day = todayStr(); const now = new Date();
+    await saveIntake(m, day, { status: 'taken', taken_at: now.toISOString(), dose: m.dose_options?.[0] ?? null, note: null, site: null });
+    toast(`${m.name} — о ${hm(now)}${m.dose_options?.length ? ` · ${m.dose_options[0]} таб.` : ''}`, async () => { S.toast = null; renderToast(); await deleteIntake(m, day); });
+  }
+  else if (a === 'undo') { const u = S.toast?.undo; if (u) u(); }
+  else if (a === 'pick') { S.sel = el.dataset.day; render(); }
+  else if (a === 'mprev' || a === 'mnext') { const m = S.month || new Date(); S.month = new Date(m.getFullYear(), m.getMonth() + (a === 'mprev' ? -1 : 1), 1); S.sel = null; render(); }
+  else if (a === 'logout') { await sb.auth.signOut(); location.reload(); }
+  else if (a === 'signup') {
+    const f = el.closest('form'); const email = f.email.value.trim(); const password = f.password.value;
+    if (password.length < 6) { $('#app').innerHTML = loginView('Пароль — щонайменше 6 символів'); return; }
+    const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
+    if (error) $('#app').innerHTML = loginView('Не вдалося: ' + error.message);
+    else if (!data.session) $('#app').innerHTML = loginView('', 'Акаунт створено. Підтверди пошту (лист від Supabase) або напиши Claude, щоб він підтвердив вручну, — потім увійди.');
+  }
+  else if (!sh) return;
+  else if (a === 'sclose') { S.sheet = null; renderSheet(); }
+  else if (a === 'sedit') { sh.edit = true; renderSheet(); }
+  else if (a === 'sdel') { const { m, day } = sh; S.sheet = null; renderSheet(); await deleteIntake(m, day); toast(`${m.name}: відмітку скасовано`); }
+  else if (a === 'sdose') { sh.dose = Number(el.dataset.v); renderSheet(); }
+  else if (a === 'ssite') { sh.site = el.dataset.v; renderSheet(); }
+  else if (a === 'smode') { sh.mode = el.dataset.v; if (sh.mode === 'custom' && !sh.time) sh.time = hm(new Date()); renderSheet(); }
+  else if (a === 'ssave') {
+    const { m, day } = sh; const t = sh.mode === 'now' ? hm(new Date()) : (sh.time || planHM(m));
+    S.sheet = null; renderSheet();
+    await saveIntake(m, day, { status: 'taken', taken_at: takenAtFor(day, t), dose: m.dose_options?.length ? sh.dose : null, site: m.track_sites ? sh.site : null, note: sh.note.trim() || null });
+    toast(`${m.name} — відмічено о ${t}`);
+  }
+  else if (a === 'sskip') {
+    const { m, day } = sh; S.sheet = null; renderSheet();
+    await saveIntake(m, day, { status: 'skipped', taken_at: null, dose: null, site: null, note: sh.note.trim() || null });
+    toast(`${m.name} — пропуск записано`);
+  }
+});
+
+document.addEventListener('input', (e) => {
+  const f = e.target.dataset?.in; if (!f || !S.sheet) return;
+  S.sheet[f] = e.target.value;
+  if (f === 'time') { const b = document.querySelector('[data-a="ssave"]'); if (b) b.textContent = `${S.sheet.m.track_sites ? 'Відмітити укол' : 'Прийняла'} · ${e.target.value}`; }
+});
+
+document.addEventListener('submit', async (e) => {
+  if (e.target.dataset.form !== 'login') return;
+  e.preventDefault();
+  const f = e.target;
+  const { error } = await sb.auth.signInWithPassword({ email: f.email.value.trim(), password: f.password.value });
+  if (error) $('#app').innerHTML = loginView(/confirm/i.test(error.message) ? 'Пошту ще не підтверджено.' : 'Неправильний email або пароль.');
+});
+
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && S.sheet) { S.sheet = null; renderSheet(); } });
+
+// refresh when returning to the app (e.g. after answering in Telegram)
+let lastLoad = 0;
+async function refresh() {
+  if (!S.user || Date.now() - lastLoad < 3000) return;
+  lastLoad = Date.now();
+  try { await loadAll(); render(); } catch (_) { /* offline */ }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
+setInterval(() => { if (document.visibilityState === 'visible' && !S.sheet) render(); }, 60000);
+
+// ---------- boot ----------
+async function boot(session) {
+  S.user = session?.user || null;
+  if (!S.user) { $('#app').innerHTML = loginView(); return; }
+  try { await ensureSeed(); await loadAll(); lastLoad = Date.now(); render(); }
+  catch (err) { $('#app').innerHTML = `<div class="login"><h1>Ой</h1><p>Не вдалося завантажити дані. Перевір інтернет і онови сторінку.</p><p class="err">${esc(err.message || err)}</p></div>`; }
+}
+
+let booted = false;
+sb.auth.onAuthStateChange((ev, session) => {
+  if (ev === 'SIGNED_IN' && !S.user) boot(session);
+  else if (ev === 'SIGNED_OUT') { S.user = null; $('#app').innerHTML = loginView(); }
+  else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
+});
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
