@@ -30,8 +30,33 @@ const hm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const todayStr = () => ymd(new Date());
 const addMin = (hhmm, mins) => { const [h, m] = hhmm.split(':').map(Number); const x = new Date(); x.setHours(h, m + mins, 0, 0); return hm(x); };
 const k = (medId, day) => `${medId}|${day}`;
-const daily = () => S.meds.filter((m) => m.kind === 'daily' && m.active);
-const weekly = () => S.meds.filter((m) => m.kind === 'weekly' && m.active);
+const WD_SHORT = ['нд', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+const activeMeds = () => S.meds.filter((m) => m.active);
+const wdays = (m) => m.weekdays?.length ? m.weekdays : (m.weekday != null ? [m.weekday] : []);
+function dueOn(m, s) {
+  if (!m.active) return false;
+  if (m.kind === 'daily') return true;
+  const d = parseYmd(s);
+  if (m.kind === 'weekly') return wdays(m).includes(d.getDay());
+  if (m.kind === 'interval') {
+    const st = m.start_date || s; if (s < st) return false;
+    const diff = Math.round((d - parseYmd(st)) / 86400000); return diff % (m.interval_days || 1) === 0;
+  }
+  return false;
+}
+// що показувати/рахувати в цей день: заплановане + те, що відмічено, хоч і не за планом
+const dayMeds = (s) => S.meds.filter((m) => dueOn(m, s) || S.intakes.get(k(m.id, s)));
+function nextDue(m, from = todayStr()) {
+  const d = parseYmd(from);
+  for (let i = 0; i < 400; i++) { const s = ymd(d); if (dueOn(m, s)) return { day: s, until: i }; d.setDate(d.getDate() + 1); }
+  return null;
+}
+function schedLabel(m) {
+  if (m.kind === 'daily') return 'щодня';
+  if (m.kind === 'weekly') { const w = wdays(m); return w.length === 7 ? 'щодня' : [1, 2, 3, 4, 5, 6, 0].filter((x) => w.includes(x)).map((x) => WD_SHORT[x]).join(', '); }
+  if (m.kind === 'interval') return `кожні ${m.interval_days} дн.`;
+  return '';
+}
 const planHM = (m) => (m.plan_time || '').slice(0, 5);
 const fmtDay = (s, opts) => parseYmd(s).toLocaleDateString('uk-UA', opts);
 
@@ -97,7 +122,7 @@ function lastSite(med) {
 function suggestSite(med) { const l = lastSite(med); return SITES[(l ? SITES.indexOf(l.site) + 1 : 0) % SITES.length]; }
 
 function dayStatus(day) {
-  const ms = daily(); let t = 0, any = 0;
+  const ms = dayMeds(day); let t = 0, any = 0;
   for (const m of ms) { const r = S.intakes.get(k(m.id, day)); if (r) { any++; if (r.status === 'taken') t++; } }
   return { t, any, n: ms.length };
 }
@@ -197,7 +222,7 @@ function medCardHtml(m) {
   } else if (skipped) {
     sub = 'Пропущено' + (r.note ? ' · ' + r.note : '');
   } else if (/після їжі/.test(m.note || '')) {
-    const pre = daily().find((x) => /до їжі/.test(x.note || ''));
+    const pre = activeMeds().find((x) => /до їжі/.test(x.note || ''));
     const pr = pre && S.intakes.get(k(pre.id, today));
     hint = pr && pr.status === 'taken' ? `Спершу поїсти (можна з ${addMin(timeOf(pr), 120)})` : 'Спершу поїсти';
   }
@@ -211,64 +236,61 @@ function medCardHtml(m) {
     </button>${right}</div>`;
 }
 
-function nextWeeklyDate(m) {
-  const d = new Date(); const until = (m.weekday - d.getDay() + 7) % 7; const x = new Date(d); x.setDate(d.getDate() + until); return { day: ymd(x), until };
-}
 function lastIntake(m) {
   let best = null; for (const r of S.intakes.values()) if (r.med_id === m.id && r.status === 'taken' && (!best || r.day > best.day)) best = r; return best;
 }
 
 function injHtml(m) {
   const today = todayStr(); const r = S.intakes.get(k(m.id, today));
-  const { day, until } = nextWeeklyDate(m);
   const done = r && r.status === 'taken';
   let sub, site;
   if (done) { sub = `Зроблено сьогодні о ${timeOf(r)}`; site = r.site || ''; }
-  else {
-    const when = until === 0 ? 'сьогодні' : until === 1 ? 'завтра' : fmtDay(day, { day: 'numeric', month: 'long' });
-    sub = `${WD_FULL[m.weekday][0].toUpperCase() + WD_FULL[m.weekday].slice(1)}, ${planHM(m)} · ${when}`;
-    site = m.track_sites ? 'Наступне місце: ' + suggestSite(m).toLowerCase() : '';
-  }
+  else if (r) { sub = 'Сьогодні — пропуск'; site = ''; }
+  else { sub = `Сьогодні, ${planHM(m)} · ${m.dose_label}`; site = 'Місце: ' + suggestSite(m).toLowerCase(); }
   return `<div class="inj"><span class="ico">${ICON_SYR('#d8cffc')}</span>
     <span class="txt" style="flex:1"><span class="nm">${esc(m.name)}</span><span class="sb">${esc(sub)}</span>${site ? `<span class="site">${esc(site)}</span>` : ''}</span>
-    <button class="act ${done ? 'done' : ''}" data-a="open" data-id="${m.id}" data-day="${today}">${done ? 'Деталі' : 'Відмітити'}</button></div>`;
+    <button class="act ${r ? 'done' : ''}" data-a="open" data-id="${m.id}" data-day="${today}">${r ? 'Деталі' : 'Відмітити'}</button></div>`;
 }
 
 function todayView() {
+  const ms = dayMeds(todayStr());
+  const pills = ms.filter((m) => !m.track_sites); const inj = ms.filter((m) => m.track_sites);
+  const empty = !ms.length ? '<div class="panel"><p>Сьогодні нічого не заплановано.</p></div>' : '';
   return headerHtml() + weekHtml() +
     `<div class="sec"><h2>Сьогодні</h2><span class="tip">Картка — деталі, кнопка — швидко</span></div>
-     <div class="list">${daily().map(medCardHtml).join('')}</div>` + weekly().map(injHtml).join('');
+     <div class="list">${pills.map(medCardHtml).join('')}</div>` + inj.map(injHtml).join('') + empty;
 }
 
 function historyView() {
   const today = todayStr(); const first = startDay();
   const m0 = S.month || new Date(); const y = m0.getFullYear(), mo = m0.getMonth();
   const lead = (new Date(y, mo, 1).getDay() + 6) % 7; const days = new Date(y, mo + 1, 0).getDate();
-  const sel = S.sel || today; const ds = daily(); const ws = weekly();
+  const sel = S.sel || today;
+  const legendMeds = S.meds.filter((m) => !m.track_sites && (m.active || [...S.intakes.values()].some((r) => r.med_id === m.id)));
+  const hasInj = S.meds.some((m) => m.track_sites);
   let ok = 0, all = 0; const cells = [];
   for (let i = 0; i < lead; i++) cells.push('<span></span>');
   for (let n = 1; n <= days; n++) {
-    const s = `${y}-${pad(mo + 1)}-${pad(n)}`; const dow = new Date(y, mo, n).getDay();
+    const s = `${y}-${pad(mo + 1)}-${pad(n)}`;
     const inRange = s >= first && s <= today;
-    const dots = ds.map((m) => {
-      if (!inRange) return 'transparent';
+    const dm = inRange ? dayMeds(s) : [];
+    const dots = dm.filter((m) => !m.track_sites).map((m) => {
       const r = S.intakes.get(k(m.id, s));
       if (r) return r.status === 'taken' ? m.color : '#b9b3c9';
       return s === today ? '#d9d4e3' : '#f0a58f';
     });
-    if (inRange && s < today) for (const m of ds) { all++; const r = S.intakes.get(k(m.id, s)); if (r && r.status === 'taken') ok++; }
-    const injDone = ws.some((m) => { const r = S.intakes.get(k(m.id, s)); return r && r.status === 'taken'; });
-    const injPlan = ws.some((m) => m.weekday === dow) && s >= today;
+    if (inRange && s < today) for (const m of dm) { all++; const r = S.intakes.get(k(m.id, s)); if (r && r.status === 'taken') ok++; }
+    const injDone = S.meds.some((m) => { if (!m.track_sites) return false; const r = S.intakes.get(k(m.id, s)); return r && r.status === 'taken'; });
+    const injPlan = S.meds.some((m) => m.track_sites && dueOn(m, s)) && s >= today;
     const cls = ['cell', s === today ? 'today' : s < today ? 'past' : 'future', s === sel && s !== today ? 'sel' : '', injDone ? 'inj' : injPlan ? 'injplan' : ''].join(' ');
     cells.push(`<button class="${cls}" data-a="pick" data-day="${s}" ${s > today ? 'disabled' : ''} aria-label="${n} число"><span class="n">${n}</span><span class="ds">${dots.map((c) => `<i style="background:${c}"></i>`).join('')}</span></button>`);
   }
   // streak
-  let streak = 0; { const x = new Date(); if (dayStatus(today).t !== ds.length) x.setDate(x.getDate() - 1);
+  let streak = 0; { const x = new Date(); { const st0 = dayStatus(today); if (st0.t !== st0.n) x.setDate(x.getDate() - 1); }
     while (ymd(x) >= first) { const st = dayStatus(ymd(x)); if (st.t === st.n && st.n) { streak++; x.setDate(x.getDate() - 1); } else break; } }
   const stat = all ? `${Math.round(ok / all * 100)}% · серія ${streak} дн.` : (streak ? `Серія ${streak} дн.` : 'Початок 🌱'.replace('🌱', '').trim());
 
-  const selDow = parseYmd(sel).getDay();
-  const rows = [...ds, ...ws.filter((m) => m.weekday === selDow || S.intakes.get(k(m.id, sel)))].map((m) => {
+  const rows = dayMeds(sel).map((m) => {
     const r = S.intakes.get(k(m.id, sel));
     let st, col;
     if (r && r.status === 'taken') { st = timeOf(r) + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : ''); col = '#c6f36b'; }
@@ -284,8 +306,8 @@ function historyView() {
        ${isCur ? '' : '<button data-a="mnext" aria-label="Наступний місяць"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>'}</div>
        <span class="stat">${esc(stat)}</span></div>
      <div class="cal"><div class="hd">${WD.map((w) => `<span>${w}</span>`).join('')}</div><div class="gr">${cells.join('')}</div>
-       <div class="legend">${ds.map((m) => `<span><i style="background:${m.color}"></i>${esc(m.name)}</span>`).join('')}
-       <span><i style="background:#b9b3c9"></i>пропуск</span><span><i style="background:#f0a58f"></i>не відмічено</span>${ws.length ? '<span><i class="sq"></i>укол</span>' : ''}</div></div>
+       <div class="legend">${legendMeds.map((m) => `<span><i style="background:${m.color}"></i>${esc(m.name)}</span>`).join('')}
+       <span><i style="background:#b9b3c9"></i>пропуск</span><span><i style="background:#f0a58f"></i>не відмічено</span>${hasInj ? '<span><i class="sq"></i>укол</span>' : ''}</div></div>
      <div class="detail"><span class="t">${sel === today ? 'Сьогодні, ' : ''}${esc(fmtDay(sel, { weekday: 'long', day: 'numeric', month: 'long' }))}</span>${rows}
        <span class="help">Натисни на рядок, щоб відмітити або змінити.</span></div>`;
 }
@@ -294,9 +316,17 @@ function medsView() {
   const st = S.settings;
   const linked = !!st?.telegram_chat_id;
   const botLink = CONFIG.botUsername && st?.link_code ? `https://t.me/${CONFIG.botUsername}?start=${st.link_code}` : '';
-  const list = S.meds.map((m) => `<div class="mrow"><i style="background:${m.color}"></i><span class="f"><b>${esc(m.name)}</b><small>${esc(m.dose_label)} · ${m.kind === 'weekly' ? WD_FULL[m.weekday] + ', ' : 'щодня, '}${planHM(m)}${m.note ? ' · ' + esc(m.note) : ''}</small><small>Нагадування за ${m.remind_before_min} хв, повтор через ${m.followup_after_min} хв, якщо не відмічено</small></span></div>`).join('');
+  const list = S.meds.map((m) => {
+    const nx = m.active && m.kind !== 'daily' ? nextDue(m) : null;
+    const nxt = nx ? (nx.until === 0 ? ' · сьогодні' : nx.until === 1 ? ' · завтра' : ' · наступний ' + fmtDay(nx.day, { day: 'numeric', month: 'long' })) : '';
+    return `<button class="mrow mbtn ${m.active ? '' : 'paused'}" data-a="edopen" data-id="${m.id}"><i style="background:${m.color}"></i><span class="f"><b>${esc(m.name)}${m.active ? '' : ' · на паузі'}</b>
+      <small>${esc(m.dose_label)} · ${esc(schedLabel(m))}, ${planHM(m)}${esc(nxt)}</small>
+      <small>${m.note ? esc(m.note) + ' · ' : ''}нагадування за ${m.remind_before_min} хв${m.followup_after_min ? `, повтор через ${m.followup_after_min} хв` : ''}</small></span>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>`;
+  }).join('');
   return `<header class="head"><div><div class="date">Налаштування</div><h1>Мої ліки</h1></div></header>
-    <div class="panel"><h3>Розклад</h3>${list}</div>
+    <div class="panel"><h3>Розклад</h3><p style="font-size:13px">Натисни на ліки, щоб змінити дозування, час чи періодичність.</p>${list}
+      <button class="btn ghost" data-a="ednew">+ Додати ліки</button></div>
     <div class="panel"><h3>Telegram</h3>
       ${linked ? '<p>Підключено. Нагадування приходять у бот, а кнопки в повідомленнях одразу відмічають прийом тут.</p>'
         : botLink ? `<p>Натисни кнопку, відкриється бот — натисни «Start». Після цього нагадування почнуть приходити.</p><a class="btn" href="${botLink}" target="_blank" rel="noopener">Підключити Telegram</a>`
@@ -379,7 +409,7 @@ function streakFor(m) {
 function quickInfo(m, day) {
   const lines = [];
   if (/після їжі/.test(m.note || '')) {
-    const pre = daily().find((x) => /до їжі/.test(x.note || ''));
+    const pre = activeMeds().find((x) => /до їжі/.test(x.note || ''));
     const pr = pre && S.intakes.get(k(pre.id, day));
     lines.push(pr && pr.status === 'taken' ? `${pre.name} о ${timeOf(pr)} → їсти можна з ${addMin(timeOf(pr), 120)}. Спершу поїж.` : 'Спершу поїж — натщесерце краще не приймати.');
   }
@@ -477,6 +507,82 @@ function renderSheet() {
     <div class="sh"><span class="grab"></span><div><div class="ttl">${esc(m.name)}</div><div class="sub">${esc(m.dose_label)} · ${esc(dayLbl)} · план ${planHM(m)}${m.note ? ' · ' + esc(m.note) : ''}</div></div>${body}</div></div>`;
 }
 
+// ---------- med editor ----------
+const COLORS = ['#e6a700', '#3fa3e0', '#e66aa8', '#6c5ce7', '#2bb39a', '#f0784a', '#8a7f9e'];
+function openEditor(id) {
+  const m = id ? S.meds.find((x) => x.id === id) : null;
+  S.ed = m ? {
+    id: m.id, name: m.name, inj: !!m.track_sites, dose_label: m.dose_label, doses: (m.dose_options || []).join(', '),
+    kind: m.kind, weekdays: [...wdays(m)], interval_days: m.interval_days || 2, start_date: m.start_date || todayStr(),
+    plan_time: planHM(m), window_label: m.window_label || '', note: m.note || '', color: m.color,
+    remind: m.remind_before_min, follow: m.followup_after_min, active: m.active, confirmDel: false, err: ''
+  } : { id: null, name: '', inj: false, dose_label: '', doses: '', kind: 'daily', weekdays: [], interval_days: 2, start_date: todayStr(),
+    plan_time: '09:00', window_label: '', note: '', color: COLORS[S.meds.length % COLORS.length], remind: 5, follow: 15, active: true, confirmDel: false, err: '' };
+  renderEditor();
+}
+function renderEditor() {
+  const e = S.ed; const root = $('#editor-root');
+  if (!e) { root.innerHTML = ''; return; }
+  const seg = (field, opts) => `<div class="seg">${opts.map(([v, l]) => `<button type="button" class="${e[field] === v ? 'on' : ''}" data-a="edset" data-f="${field}" data-v="${v}">${l}</button>`).join('')}</div>`;
+  const sel = (field, vals, fmt) => `<select data-ein="${field}">${vals.map((v) => `<option value="${v}" ${Number(e[field]) === v ? 'selected' : ''}>${fmt(v)}</option>`).join('')}</select>`;
+  const sched = e.kind === 'weekly'
+    ? `<div class="days">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<button type="button" class="opt ${e.weekdays.includes(d) ? 'on' : ''}" data-a="edday" data-v="${d}">${WD_SHORT[d]}</button>`).join('')}</div>`
+    : e.kind === 'interval'
+      ? `<div class="row">Кожні<input type="number" min="2" max="365" inputmode="numeric" data-ein="interval_days" value="${e.interval_days}" style="width:90px">днів</div>
+         <label class="row">Починаючи з<input type="date" data-ein="start_date" value="${esc(e.start_date)}"></label>` : '';
+  root.innerHTML = `<div class="ov" role="dialog" aria-modal="true" aria-label="Ліки"><button class="bg" data-a="edclose" aria-label="Закрити"></button>
+    <div class="sh"><span class="grab"></span><div class="ttl">${e.id ? 'Змінити ліки' : 'Нові ліки'}</div>
+    <label class="lbl">Назва<input type="text" data-ein="name" value="${esc(e.name)}" placeholder="Напр. Вітамін D"></label>
+    <div class="lbl">Тип${seg('inj', [[false, 'Таблетки'], [true, 'Укол']])}</div>
+    <label class="lbl">Дозування<input type="text" data-ein="dose_label" value="${esc(e.dose_label)}" placeholder="Напр. 2 × 50 мг або 1 таблетка"></label>
+    ${e.inj ? '' : `<label class="lbl">Варіанти кількості (необовʼязково)<input type="text" inputmode="numeric" data-ein="doses" value="${esc(e.doses)}" placeholder="Напр. 2, 3 — зʼявляться кнопки вибору"></label>`}
+    <div class="lbl">Періодичність${seg('kind', [['daily', 'Щодня'], ['weekly', 'Дні тижня'], ['interval', 'Кожні N днів']])}${sched}</div>
+    <label class="row">Час прийому<input type="time" data-ein="plan_time" value="${esc(e.plan_time)}"></label>
+    <label class="lbl">Проміжок (необовʼязково)<input type="text" data-ein="window_label" value="${esc(e.window_label)}" placeholder="Напр. 9:00–10:00"></label>
+    <label class="lbl">Примітка<input type="text" data-ein="note" value="${esc(e.note)}" placeholder="Напр. після їжі / за 2 год до їжі"></label>
+    <div class="lbl">Колір<div class="colors">${COLORS.map((c) => `<button type="button" class="clr ${e.color === c ? 'on' : ''}" style="background:${c}" data-a="edcolor" data-v="${c}" aria-label="Колір"></button>`).join('')}</div></div>
+    <label class="row">Нагадати за${sel('remind', [0, 5, 10, 15, 30, 60], (v) => v ? v + ' хв' : 'у час прийому')}</label>
+    <label class="row">Повтор, якщо не відмічено${sel('follow', [0, 10, 15, 30, 60], (v) => v ? 'через ' + v + ' хв' : 'не повторювати')}</label>
+    ${e.id ? `<div class="nrow"><span>Активні<small>Вимкни, щоб поставити на паузу без втрати історії</small></span><button type="button" class="sw" role="switch" aria-checked="${e.active}" data-a="edactive" aria-label="Активні"></button></div>` : ''}
+    ${e.err ? `<div class="err">${esc(e.err)}</div>` : ''}
+    <button class="btn" data-a="edsave">Зберегти</button>
+    ${e.id ? `<button class="btn link" data-a="eddel" style="color:#b42318">${e.confirmDel ? 'Точно видалити? Уся історія цих ліків теж зникне — натисни ще раз' : 'Видалити ліки'}</button>` : ''}
+    </div></div>`;
+}
+async function saveEditor() {
+  const e = S.ed;
+  if (!e.name.trim()) { e.err = 'Вкажи назву'; return renderEditor(); }
+  if (!e.dose_label.trim()) { e.err = 'Вкажи дозування'; return renderEditor(); }
+  if (!/^\d{2}:\d{2}$/.test(e.plan_time)) { e.err = 'Вкажи час прийому'; return renderEditor(); }
+  if (e.kind === 'weekly' && !e.weekdays.length) { e.err = 'Вибери хоча б один день тижня'; return renderEditor(); }
+  const iv = Number(e.interval_days);
+  if (e.kind === 'interval' && !(iv >= 2 && iv <= 365)) { e.err = 'Інтервал — від 2 до 365 днів'; return renderEditor(); }
+  const doses = e.inj ? [] : e.doses.split(/[,;\s]+/).map(Number).filter((n) => n > 0 && n < 100);
+  const row = {
+    name: e.name.trim(), dose_label: e.dose_label.trim(), dose_options: doses.length ? doses : null, track_sites: e.inj,
+    kind: e.kind, weekdays: e.kind === 'weekly' ? e.weekdays : null, weekday: e.kind === 'weekly' ? e.weekdays[0] : null,
+    interval_days: e.kind === 'interval' ? iv : null, start_date: e.kind === 'interval' ? e.start_date : null,
+    plan_time: e.plan_time, window_label: e.window_label.trim() || null, note: e.note.trim() || null, color: e.color,
+    remind_before_min: Number(e.remind), followup_after_min: Number(e.follow), active: e.active
+  };
+  let res;
+  if (e.id) res = await sb.from('meds').update(row).eq('id', e.id).select().single();
+  else res = await sb.from('meds').insert({ ...row, sort: Math.max(0, ...S.meds.map((m) => m.sort || 0)) + 1 }).select().single();
+  if (res.error) { e.err = 'Не вдалося зберегти: ' + res.error.message; return renderEditor(); }
+  const i = S.meds.findIndex((m) => m.id === res.data.id);
+  if (i >= 0) S.meds[i] = res.data; else S.meds.push(res.data);
+  S.ed = null; renderEditor(); render(); toast(`${row.name} — збережено`);
+}
+async function deleteMed() {
+  const e = S.ed;
+  if (!e.confirmDel) { e.confirmDel = true; return renderEditor(); }
+  const { error } = await sb.from('meds').delete().eq('id', e.id);
+  if (error) { e.err = 'Не вдалося видалити'; return renderEditor(); }
+  S.meds = S.meds.filter((m) => m.id !== e.id);
+  for (const key of [...S.intakes.keys()]) if (key.startsWith(e.id + '|')) S.intakes.delete(key);
+  S.ed = null; renderEditor(); render(); toast('Видалено');
+}
+
 // ---------- render ----------
 function render() {
   if (!S.user) return;
@@ -517,6 +623,15 @@ document.addEventListener('click', async (e) => {
     const { error } = await sb.from('snoozes').insert({ med_id: m.id, day, due_at: due.toISOString() });
     if (error) toast('Не вдалося: ' + error.message); else quickDone(`Нагадаю о ${hm(due)}`);
   }
+  else if (a === 'edopen') openEditor(el.dataset.id);
+  else if (a === 'ednew') openEditor(null);
+  else if (a === 'edclose') { S.ed = null; renderEditor(); }
+  else if (a === 'edset') { const f = el.dataset.f; let v = el.dataset.v; if (f === 'inj') v = v === 'true'; S.ed[f] = v; if (f === 'kind' && v === 'weekly' && !S.ed.weekdays.length) S.ed.weekdays = [new Date().getDay()]; S.ed.err = ''; renderEditor(); }
+  else if (a === 'edday') { const d = Number(el.dataset.v); const w = S.ed.weekdays; S.ed.weekdays = w.includes(d) ? w.filter((x) => x !== d) : [...w, d]; renderEditor(); }
+  else if (a === 'edcolor') { S.ed.color = el.dataset.v; renderEditor(); }
+  else if (a === 'edactive') { S.ed.active = !S.ed.active; renderEditor(); }
+  else if (a === 'edsave') saveEditor();
+  else if (a === 'eddel') deleteMed();
   else if (a === 'pushon') enablePush();
   else if (a === 'pushoff') disablePush();
   else if (a === 'pushtoggle') updateSettings({ notify_push: !S.settings.notify_push });
@@ -543,6 +658,7 @@ document.addEventListener('click', async (e) => {
 });
 
 document.addEventListener('input', (e) => {
+  const ef = e.target.dataset?.ein; if (ef && S.ed) { S.ed[ef] = e.target.value; return; }
   const f = e.target.dataset?.in; if (!f || !S.sheet) return;
   S.sheet[f] = e.target.value;
   if (f === 'time') { const b = document.querySelector('[data-a="ssave"]'); if (b) b.textContent = `${S.sheet.m.track_sites ? 'Відмітити укол' : 'Прийняла'} · ${e.target.value}`; }
@@ -566,7 +682,7 @@ document.addEventListener('submit', async (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if (S.sheet) { S.sheet = null; renderSheet(); } else if (S.quick) { S.quick = null; renderQuick(); }
+  if (S.ed) { S.ed = null; renderEditor(); } else if (S.sheet) { S.sheet = null; renderSheet(); } else if (S.quick) { S.quick = null; renderQuick(); }
 });
 async function takePending() {
   try {

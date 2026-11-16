@@ -146,7 +146,16 @@ button{cursor:pointer}
 .opt.on{border-color:var(--accent);background:#f1eefe}
 .opt small{display:block;font-size:11px;color:var(--accent-ink)}
 .row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:14px;font-weight:700;color:var(--muted2)}
-input[type=time],input[type=email],input[type=password],textarea{min-height:44px;padding:10px 12px;border-radius:14px;border:2px solid var(--line);font-size:16px;background:#fff;width:auto}
+select{min-height:44px;padding:0 12px;border-radius:14px;border:2px solid var(--line);font-size:16px;background:#fff;color:var(--ink);font-family:inherit}
+.days{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.days .opt{min-height:44px;padding:0;font-size:13px}
+.colors{display:flex;gap:10px;flex-wrap:wrap}
+.clr{width:36px;height:36px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 2px var(--line)}
+.clr.on{box-shadow:0 0 0 3px var(--ink)}
+.mbtn{width:100%;border:0;background:transparent;text-align:left;padding:8px 0;color:var(--ink);border-top:1px solid #f0edf7}
+.mbtn svg{color:var(--muted);flex-shrink:0}
+.mbtn.paused{opacity:.55}
+input[type=text],input[type=number],input[type=date],input[type=time],input[type=email],input[type=password],textarea{min-height:44px;padding:10px 12px;border-radius:14px;border:2px solid var(--line);font-size:16px;background:#fff;width:auto}
 input[type=email],input[type=password],textarea{width:100%}
 textarea{resize:none}
 .done-box{padding:12px 14px;border-radius:16px;background:var(--ok-soft);font-size:14px;color:var(--ok-ink);font-weight:700}

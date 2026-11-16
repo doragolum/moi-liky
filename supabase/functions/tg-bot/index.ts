@@ -54,7 +54,8 @@ const WINDOW_AFTER_MIN = 180; // не надсилати нагадування 
 
 type Med = {
   id: string; user_id: string; name: string; dose_label: string; dose_options: number[] | null;
-  kind: "daily" | "weekly"; weekday: number | null; plan_time: string; note: string | null;
+  kind: "daily" | "weekly" | "interval"; weekday: number | null; weekdays: number[] | null;
+  interval_days: number | null; start_date: string | null; plan_time: string; note: string | null;
   remind_before_min: number; followup_after_min: number; track_sites: boolean; active: boolean;
 };
 
@@ -72,6 +73,17 @@ function local(tz: string, d = new Date()) {
     timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", weekday: "short", hourCycle: "h23",
   }).formatToParts(d).map((x) => [x.type, x.value]));
   return { day: `${p.year}-${p.month}-${p.day}`, min: Number(p.hour) * 60 + Number(p.minute), hm: `${p.hour}:${p.minute}`, dow: DOW[p.weekday] };
+}
+function dueOn(m: Med, day: string, dow: number) {
+  if (!m.active) return false;
+  if (m.kind === "daily") return true;
+  if (m.kind === "weekly") return (m.weekdays?.length ? m.weekdays : m.weekday != null ? [m.weekday] : []).includes(dow);
+  if (m.kind === "interval") {
+    const st = m.start_date ?? day; if (day < st) return false;
+    const diff = Math.round((Date.parse(day + "T00:00:00Z") - Date.parse(st + "T00:00:00Z")) / 86400000);
+    return diff % (m.interval_days || 1) === 0;
+  }
+  return false;
 }
 const toMin = (t: string) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
 const fromMin = (x: number) => `${pad(Math.floor(((x % 1440) + 1440) % 1440 / 60))}:${pad(((x % 60) + 60) % 60)}`;
@@ -125,11 +137,11 @@ async function tick() {
 
     for (const m of (meds ?? []) as Med[]) {
       if (done.has(m.id)) continue;
-      if (m.kind === "weekly" && m.weekday !== L.dow) continue;
+      if (!dueOn(m, L.day, L.dow)) continue;
       const plan = toMin(m.plan_time.slice(0, 5));
       if (L.min > plan + WINDOW_AFTER_MIN) continue;
       let kind: "remind" | "followup" | null = null;
-      if (L.min >= plan + m.followup_after_min) kind = "followup";
+      if (m.followup_after_min > 0 && L.min >= plan + m.followup_after_min) kind = "followup";
       else if (L.min >= plan - m.remind_before_min) kind = "remind";
       if (!kind) continue;
       // спершу «бронюємо» запис у журналі, щоб не надіслати двічі
@@ -175,7 +187,7 @@ async function todaySummary(st: { user_id: string; tz: string }) {
   const L = local(st.tz);
   const { data: meds } = await sb.from("meds").select("*").eq("user_id", st.user_id).eq("active", true).order("sort");
   const { data: ints } = await sb.from("intakes").select("*").eq("user_id", st.user_id).eq("day", L.day);
-  const lines = ((meds ?? []) as Med[]).filter((m) => m.kind === "daily" || m.weekday === L.dow).map((m) => {
+  const lines = ((meds ?? []) as Med[]).filter((m) => dueOn(m, L.day, L.dow)).map((m) => {
     const r = (ints ?? []).find((x) => x.med_id === m.id);
     const st2 = !r ? "ще ні" : r.status === "skipped" ? "пропуск" : "✓ " + local(st.tz, new Date(r.taken_at)).hm;
     return `• ${esc(m.name)} (${m.plan_time.slice(0, 5)}) — ${st2}`;
