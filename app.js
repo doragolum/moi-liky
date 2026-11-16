@@ -109,6 +109,42 @@ function startDay() {
   return first;
 }
 
+// ---------- push notifications ----------
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const P = { sub: null };
+const b64u = (s) => { const p = '='.repeat((4 - s.length % 4) % 4); const b = atob((s + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, (c) => c.charCodeAt(0)); };
+async function checkPush() {
+  if (!pushSupported()) return;
+  try { const reg = await navigator.serviceWorker.ready; P.sub = await reg.pushManager.getSubscription(); } catch (_) {}
+}
+async function enablePush() {
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') { toast('Дозвіл не надано'); render(); return; }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(CONFIG.vapidPublicKey) });
+    const j = sub.toJSON();
+    const { error } = await sb.from('push_subscriptions').upsert({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, user_agent: navigator.userAgent }, { onConflict: 'endpoint' });
+    if (error) throw error;
+    P.sub = sub;
+    if (!S.settings.notify_push) await updateSettings({ notify_push: true });
+    reg.showNotification('Мої ліки', { body: 'Сповіщення увімкнено — тепер нагадування приходитимуть сюди.', icon: 'icons/icon-192.png', tag: 'enabled' });
+    render();
+  } catch (e) { toast('Не вдалося увімкнути: ' + (e.message || e)); }
+}
+async function disablePush() {
+  const sub = P.sub;
+  if (sub) { await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint); try { await sub.unsubscribe(); } catch (_) {} }
+  P.sub = null; render(); toast('Сповіщення на цьому телефоні вимкнено');
+}
+async function updateSettings(patch) {
+  Object.assign(S.settings, patch); render();
+  const { error } = await sb.from('settings').update(patch).eq('user_id', S.user.id);
+  if (error) toast('Не вдалося зберегти налаштування');
+}
+
 // ---------- toast ----------
 let toastTimer;
 function toast(text, undo) {
@@ -266,8 +302,32 @@ function medsView() {
         : botLink ? `<p>Натисни кнопку, відкриється бот — натисни «Start». Після цього нагадування почнуть приходити.</p><a class="btn" href="${botLink}" target="_blank" rel="noopener">Підключити Telegram</a>`
         : '<p>Бот ще налаштовується.</p>'}
     </div>
+    <div class="panel"><h3>Куди надсилати нагадування</h3>
+      ${pushPanel()}
+      <div class="nrow"><span>Telegram<small>${linked ? 'З кнопками «Прийняла», «Через 15 хв»' : 'Ще не підключено — див. нижче'}</small></span>
+        ${linked ? `<button class="sw" role="switch" aria-checked="${!!st.notify_telegram}" aria-label="Нагадування в Telegram" data-a="tgtoggle"></button>` : ''}</div>
+    </div>
     <div class="panel"><h3>На головний екран</h3><p>iPhone: Safari → «Поділитися» → «На екран „Додому“». Android: Chrome → ⋮ → «Додати на головний екран».</p></div>
     <div class="panel"><button class="btn ghost" data-a="logout">Вийти з акаунта</button></div>`;
+}
+
+function pushPanel() {
+  const st = S.settings;
+  let info = '', ctrl = '';
+  if (!pushSupported()) {
+    info = isIOS && !isStandalone() ? 'Щоб увімкнути, спершу додай додаток на головний екран і відкрий його з іконки.' : 'Цей браузер не підтримує сповіщення.';
+  } else if (Notification.permission === 'denied') {
+    info = 'Сповіщення заборонені. Увімкни: Налаштування iPhone → Сповіщення → Мої ліки.';
+  } else if (P.sub) {
+    info = 'Банер на екрані, навіть коли телефон заблоковано';
+    ctrl = `<button class="sw" role="switch" aria-checked="${!!st.notify_push}" aria-label="Сповіщення на телефоні" data-a="pushtoggle"></button>`;
+  } else {
+    info = 'Банер на екрані, навіть коли телефон заблоковано';
+  }
+  const row = `<div class="nrow"><span>На цьому телефоні<small>${esc(info)}</small></span>${ctrl}</div>`;
+  const btn = pushSupported() && Notification.permission !== 'denied' && !P.sub ? '<button class="btn" data-a="pushon">Увімкнути сповіщення</button>' : '';
+  const off = P.sub ? '<button class="btn link" data-a="pushoff">Відʼєднати цей телефон</button>' : '';
+  return row + btn + off;
 }
 
 function navHtml() {
@@ -358,6 +418,10 @@ document.addEventListener('click', async (e) => {
   else if (a === 'pick') { S.sel = el.dataset.day; render(); }
   else if (a === 'mprev' || a === 'mnext') { const m = S.month || new Date(); S.month = new Date(m.getFullYear(), m.getMonth() + (a === 'mprev' ? -1 : 1), 1); S.sel = null; render(); }
   else if (a === 'logout') { await sb.auth.signOut(); location.reload(); }
+  else if (a === 'pushon') enablePush();
+  else if (a === 'pushoff') disablePush();
+  else if (a === 'pushtoggle') updateSettings({ notify_push: !S.settings.notify_push });
+  else if (a === 'tgtoggle') updateSettings({ notify_telegram: !S.settings.notify_telegram });
   else if (a === 'lmode') { loginMode = el.dataset.v; $('#app').innerHTML = loginView(); }
   else if (!sh) return;
   else if (a === 'sclose') { S.sheet = null; renderSheet(); }
@@ -417,7 +481,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && !S.sheet) rend
 async function boot(session) {
   S.user = session?.user || null;
   if (!S.user) { $('#app').innerHTML = loginView(); return; }
-  try { await ensureSeed(); await loadAll(); lastLoad = Date.now(); render(); }
+  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); }
   catch (err) { $('#app').innerHTML = `<div class="login"><h1>Ой</h1><p>Не вдалося завантажити дані. Перевір інтернет і онови сторінку.</p><p class="err">${esc(err.message || err)}</p></div>`; }
 }
 

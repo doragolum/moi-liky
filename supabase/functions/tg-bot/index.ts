@@ -3,6 +3,7 @@
 //               2) pg_cron щохвилини (заголовок x-cron-secret, ?action=tick)
 //               3) одноразово для налаштування (?action=setup)
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import webpush from "npm:web-push@3.6.7";
 
 const APP_URL = Deno.env.get("APP_URL") ?? "https://doragolum.github.io/moi-liky/";
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
@@ -12,11 +13,40 @@ const sb = createClient(SB_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { au
 let TOKEN = Deno.env.get("TG_BOT_TOKEN") ?? "";
 let HOOK_SECRET = Deno.env.get("TG_WEBHOOK_SECRET") ?? "";
 let CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
+let vapidReady = false;
 async function loadSecrets() {
-  if (TOKEN && HOOK_SECRET && CRON_SECRET) return;
+  if (TOKEN && HOOK_SECRET && CRON_SECRET && vapidReady) return;
   const { data } = await sb.from("app_secrets").select("name, value");
   const m = Object.fromEntries((data ?? []).map((r) => [r.name, r.value]));
   TOKEN ||= m.TG_BOT_TOKEN ?? ""; HOOK_SECRET ||= m.TG_WEBHOOK_SECRET ?? ""; CRON_SECRET ||= m.CRON_SECRET ?? "";
+  if (!vapidReady && m.VAPID_PUBLIC && m.VAPID_PRIVATE) {
+    webpush.setVapidDetails(APP_URL, m.VAPID_PUBLIC, m.VAPID_PRIVATE);
+    vapidReady = true;
+  }
+}
+
+type Sub = { id: string; endpoint: string; p256dh: string; auth: string };
+async function pushTo(subs: Sub[], payload: Record<string, unknown>) {
+  let ok = 0;
+  for (const s of subs) {
+    try {
+      await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, JSON.stringify(payload), { TTL: 3600, urgency: "high" });
+      ok++;
+    } catch (e: any) {
+      console.error("push failed", e?.statusCode, e?.body);
+      if (e?.statusCode === 404 || e?.statusCode === 410) await sb.from("push_subscriptions").delete().eq("id", s.id);
+    }
+  }
+  return ok;
+}
+function pushPayload(m: Med, day: string, followup: boolean) {
+  const plan = m.plan_time.slice(0, 5);
+  return {
+    title: followup ? `Ще не відмічено: ${m.name}` : `${m.name} · ${plan}`,
+    body: followup ? `План був о ${plan}. Натисни, щоб відмітити.` : `${m.dose_label}${m.note ? " · " + m.note : ""}`,
+    tag: `${m.id}|${day}`,
+    url: APP_URL,
+  };
 }
 
 const SITES = ["Живіт ліворуч", "Живіт праворуч", "Стегно ліве", "Стегно праве", "Плече ліве", "Плече праве"];
@@ -76,9 +106,16 @@ async function reminderPayload(m: Med, day: string, followup: boolean) {
 
 // ---------- cron tick ----------
 async function tick() {
-  const { data: users } = await sb.from("settings").select("user_id, tz, telegram_chat_id").not("telegram_chat_id", "is", null);
+  const { data: users } = await sb.from("settings").select("user_id, tz, telegram_chat_id, notify_telegram, notify_push");
   let sent = 0;
   for (const u of users ?? []) {
+    const tgOn = !!u.telegram_chat_id && u.notify_telegram;
+    let subs: Sub[] = [];
+    if (u.notify_push) {
+      const { data } = await sb.from("push_subscriptions").select("id, endpoint, p256dh, auth").eq("user_id", u.user_id);
+      subs = data ?? [];
+    }
+    if (!tgOn && !subs.length) continue;
     const L = local(u.tz);
     const { data: meds } = await sb.from("meds").select("*").eq("user_id", u.user_id).eq("active", true);
     const ids = (meds ?? []).map((m) => m.id);
@@ -102,9 +139,12 @@ async function tick() {
         // якщо звичайне нагадування ще не йшло (напр. щойно підключилась) — не дублюємо
         await sb.from("reminders_log").upsert({ med_id: m.id, day: L.day, kind: "remind" }, { onConflict: "med_id,day,kind", ignoreDuplicates: true });
       }
-      const p = await reminderPayload(m, L.day, kind === "followup");
-      const r = await tg("sendMessage", { chat_id: u.telegram_chat_id, parse_mode: "HTML", ...p });
-      if (r.ok) { sent++; await sb.from("reminders_log").update({ tg_message_id: r.result.message_id }).eq("med_id", m.id).eq("day", L.day).eq("kind", kind); }
+      if (subs.length) sent += await pushTo(subs, pushPayload(m, L.day, kind === "followup"));
+      if (tgOn) {
+        const p = await reminderPayload(m, L.day, kind === "followup");
+        const r = await tg("sendMessage", { chat_id: u.telegram_chat_id, parse_mode: "HTML", ...p });
+        if (r.ok) { sent++; await sb.from("reminders_log").update({ tg_message_id: r.result.message_id }).eq("med_id", m.id).eq("day", L.day).eq("kind", kind); }
+      }
     }
 
     // відкладені («через 15 хв»)
@@ -114,9 +154,12 @@ async function tick() {
       const { data: has } = await sb.from("intakes").select("id").eq("med_id", s.med_id).eq("day", s.day).maybeSingle();
       if (has) continue;
       const m = (meds as Med[]).find((x) => x.id === s.med_id)!;
-      const p = await reminderPayload(m, s.day, true);
-      await tg("sendMessage", { chat_id: u.telegram_chat_id, parse_mode: "HTML", ...p });
-      sent++;
+      if (subs.length) sent += await pushTo(subs, pushPayload(m, s.day, true));
+      if (tgOn) {
+        const p = await reminderPayload(m, s.day, true);
+        await tg("sendMessage", { chat_id: u.telegram_chat_id, parse_mode: "HTML", ...p });
+        sent++;
+      }
     }
   }
   return { ok: true, sent };
@@ -223,6 +266,11 @@ Deno.serve(async (req) => {
 
   if (action && req.headers.get("x-cron-secret") === CRON_SECRET) {
     if (action === "tick") return Response.json(await tick());
+    if (action === "testpush") {
+      const { data } = await sb.from("push_subscriptions").select("id, endpoint, p256dh, auth");
+      const n = await pushTo(data ?? [], { title: "Мої ліки", body: "Тестове сповіщення — усе працює.", tag: "test", url: APP_URL });
+      return Response.json({ subs: data?.length ?? 0, delivered: n });
+    }
     if (action === "setup") {
       const me = await tg("getMe", {});
       const hook = await tg("setWebhook", { url: `${SB_URL}/functions/v1/tg-bot`, secret_token: HOOK_SECRET, allowed_updates: ["message", "callback_query"], drop_pending_updates: true });

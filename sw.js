@@ -1,6 +1,6 @@
 // Простий service worker: оболонка додатку з кешу, щоб відкривався миттєво.
 // Дані завжди беруться з мережі (Supabase).
-const CACHE = 'moi-liky-v4';
+const CACHE = 'moi-liky-v5';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
@@ -9,6 +9,23 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
 });
+// ---- сповіщення ----
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (_) { d = { body: e.data ? e.data.text() : '' }; }
+  e.waitUntil(self.registration.showNotification(d.title || 'Мої ліки', {
+    body: d.body || '', tag: d.tag || 'moi-liky', renotify: true,
+    icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', data: { url: d.url || './' }
+  }));
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((cs) => {
+    for (const c of cs) if ('focus' in c) return c.focus();
+    return self.clients.openWindow(e.notification.data?.url || './');
+  }));
+});
+
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
