@@ -140,6 +140,8 @@ button{cursor:pointer}
 .ov{position:fixed;inset:0;z-index:20;display:flex;flex-direction:column;animation:fade .15s ease}
 .ov .bg{flex:1;border:0;padding:0;background:rgba(20,18,30,.45)}
 .sh{background:#fff;border-radius:28px 28px 0 0;padding:16px 20px calc(22px + var(--safe-b));display:flex;flex-direction:column;gap:14px;max-height:88vh;overflow:auto;width:100%;max-width:480px;margin:0 auto;animation:up .2s ease}
+.shh{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.shx{flex-shrink:0;width:40px;height:40px;border:0;border-radius:12px;background:#f1eef6;color:var(--muted2);display:flex;align-items:center;justify-content:center}
 .sh .grab{align-self:center;width:40px;height:5px;border-radius:3px;background:#dcd7e8}
 .sh .ttl{font-size:20px;font-weight:800}
 .sh .sub{font-size:13px;color:var(--muted)}
@@ -173,7 +175,7 @@ textarea{resize:none}
 .login h1{margin:0;font-size:30px;font-weight:800;letter-spacing:-.02em}
 .login p{margin:0;color:var(--muted2);font-size:15px}
 .err{color:#b42318;font-size:14px;font-weight:600}
-.seg{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;border-radius:16px;background:#e9e5f7}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:4px;padding:4px;border-radius:16px;background:#e9e5f7}
 .seg button{min-height:42px;border:0;border-radius:12px;background:transparent;font-size:15px;font-weight:700;color:var(--muted2)}
 .seg button.on{background:#fff;color:var(--accent-ink);box-shadow:0 1px 3px rgba(31,29,43,.1)}
 

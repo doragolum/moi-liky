@@ -514,7 +514,7 @@ function renderSheet() {
       <button class="btn link" data-a="sskip">${day === today ? 'Пропускаю сьогодні' : 'Відмітити як пропуск'}</button>`;
   }
   root.innerHTML = `<div class="ov" role="dialog" aria-modal="true" aria-label="${esc(m.name)}"><button class="bg" data-a="sclose" aria-label="Закрити"></button>
-    <div class="sh"><span class="grab"></span><div><div class="ttl">${esc(m.name)}</div><div class="sub">${esc(m.dose_label)} · ${esc(dayLbl)} · план ${planHM(m)}${m.note ? ' · ' + esc(m.note) : ''}</div></div>${body}</div></div>`;
+    <div class="sh"><span class="grab"></span><div class="shh"><div><div class="ttl">${esc(m.name)}</div><div class="sub">${esc(m.dose_label)} · ${esc(dayLbl)} · план ${planHM(m)}${m.note ? ' · ' + esc(m.note) : ''}</div></div><button class="shx" data-a="sclose" aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>${body}</div></div>`;
 }
 
 // ---------- med editor ----------
@@ -541,7 +541,7 @@ function renderEditor() {
       ? `<div class="row">Кожні<input type="number" min="2" max="365" inputmode="numeric" data-ein="interval_days" value="${e.interval_days}" style="width:90px">днів</div>
          <label class="row">Починаючи з<input type="date" data-ein="start_date" value="${esc(e.start_date)}"></label>` : '';
   root.innerHTML = `<div class="ov" role="dialog" aria-modal="true" aria-label="Ліки"><button class="bg" data-a="edclose" aria-label="Закрити"></button>
-    <div class="sh"><span class="grab"></span><div class="ttl">${e.id ? 'Змінити ліки' : 'Нові ліки'}</div>
+    <div class="sh"><span class="grab"></span><div class="shh"><div class="ttl">${e.id ? 'Змінити ліки' : 'Нові ліки'}</div><button class="shx" data-a="edclose" aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
     <label class="lbl">Назва<input type="text" data-ein="name" value="${esc(e.name)}" placeholder="Напр. Вітамін D"></label>
     <div class="lbl">Тип${seg('inj', [[false, 'Таблетки'], [true, 'Укол']])}</div>
     <label class="lbl">Дозування<input type="text" data-ein="dose_label" value="${esc(e.dose_label)}" placeholder="Напр. 2 × 50 мг або 1 таблетка"></label>
@@ -592,6 +592,33 @@ async function deleteMed() {
   for (const key of [...S.intakes.keys()]) if (key.startsWith(e.id + '|')) S.intakes.delete(key);
   S.ed = null; renderEditor(); render(); toast('Видалено');
 }
+
+// ---------- swipe down to close sheets ----------
+let drag = null;
+document.addEventListener('touchstart', (e) => {
+  const sh = e.target.closest('.sh'); if (!sh) return;
+  if (e.target.closest('input,textarea,select')) return;
+  if (sh.scrollTop > 0 && !e.target.closest('.grab,.shh')) return;
+  drag = { sh, y: e.touches[0].clientY, dy: 0 };
+  sh.style.transition = 'none';
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (!drag) return;
+  const dy = e.touches[0].clientY - drag.y;
+  if (dy <= 0 && drag.dy === 0) { drag = null; return; } // це прокрутка вгору — не заважаємо
+  drag.dy = Math.max(0, dy);
+  drag.sh.style.transform = `translateY(${drag.dy}px)`;
+  if (e.cancelable) e.preventDefault();
+}, { passive: false });
+document.addEventListener('touchend', () => {
+  if (!drag) return;
+  const { sh, dy } = drag; drag = null;
+  sh.style.transition = 'transform .2s ease';
+  if (dy > 110) {
+    sh.style.transform = 'translateY(100%)';
+    setTimeout(() => sh.closest('.ov')?.querySelector('.bg')?.click(), 180);
+  } else sh.style.transform = '';
+});
 
 // ---------- render ----------
 function render() {
