@@ -599,8 +599,8 @@ document.addEventListener('touchstart', (e) => {
   const sh = e.target.closest('.sh'); if (!sh) return;
   if (e.target.closest('input,textarea,select')) return;
   if (sh.scrollTop > 0 && !e.target.closest('.grab,.shh')) return;
-  drag = { sh, y: e.touches[0].clientY, dy: 0 };
-  sh.style.transition = 'none';
+  drag = { sh, ov: sh.closest('.ov'), y: e.touches[0].clientY, dy: 0 };
+  sh.style.transition = 'none'; if (drag.ov) drag.ov.style.transition = 'none';
 }, { passive: true });
 document.addEventListener('touchmove', (e) => {
   if (!drag) return;
@@ -608,16 +608,19 @@ document.addEventListener('touchmove', (e) => {
   if (dy <= 0 && drag.dy === 0) { drag = null; return; } // це прокрутка вгору — не заважаємо
   drag.dy = Math.max(0, dy);
   drag.sh.style.transform = `translateY(${drag.dy}px)`;
+  if (drag.ov) drag.ov.style.background = `rgba(20,18,30,${(0.45 * Math.max(0, 1 - drag.dy / drag.sh.offsetHeight)).toFixed(3)})`;
   if (e.cancelable) e.preventDefault();
 }, { passive: false });
 document.addEventListener('touchend', () => {
   if (!drag) return;
-  const { sh, dy } = drag; drag = null;
+  const { sh, ov, dy } = drag; drag = null;
   sh.style.transition = 'transform .2s ease';
+  if (ov) ov.style.transition = 'background .2s ease';
   if (dy > 110) {
     sh.style.transform = 'translateY(100%)';
-    setTimeout(() => sh.closest('.ov')?.querySelector('.bg')?.click(), 180);
-  } else sh.style.transform = '';
+    if (ov) ov.style.background = 'rgba(20,18,30,0)';
+    setTimeout(() => ov?.querySelector('.bg')?.click(), 190);
+  } else { sh.style.transform = ''; if (ov) ov.style.background = ''; }
 });
 
 // ---------- render ----------
@@ -763,7 +766,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 12;
+const APP_VERSION = 13;
 // заборона зуму щипком і подвійним тапом (iOS ігнорує user-scalable=no у деяких режимах)
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 && e.cancelable) e.preventDefault(); }, { passive: false });

@@ -137,8 +137,8 @@ button{cursor:pointer}
 .nav button.on{background:var(--accent-soft);color:var(--accent-ink)}
 
 /* sheet */
-.ov{position:fixed;inset:0;z-index:20;display:flex;flex-direction:column;animation:fade .15s ease}
-.ov .bg{flex:1;border:0;padding:0;background:rgba(20,18,30,.45)}
+.ov{position:fixed;inset:0;z-index:20;display:flex;flex-direction:column;animation:fade .15s ease;background:rgba(20,18,30,.45);transition:background .2s ease}
+.ov .bg{flex:1;border:0;padding:0;background:transparent}
 .sh{background:#fff;border-radius:28px 28px 0 0;padding:16px 20px calc(22px + var(--safe-b));display:flex;flex-direction:column;gap:14px;max-height:88vh;overflow:auto;width:100%;max-width:480px;margin:0 auto;animation:up .2s ease}
 .shh{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
 .shx{flex-shrink:0;width:40px;height:40px;border:0;border-radius:12px;background:#f1eef6;color:var(--muted2);display:flex;align-items:center;justify-content:center}
