@@ -207,12 +207,14 @@ function weekHtml() {
     const st = dayStatus(s); let dot = 'transparent';
     if (s < today && s >= first) dot = st.t === st.n ? '#1f8a5b' : st.any ? '#f2b544' : '#f0a58f';
     if (s === today) dot = st.t === st.n ? '#1f8a5b' : st.any ? '#f2b544' : '#c9c2dd';
-    return `<div class="wd ${s === today ? 'today' : ''}"><span class="l">${l}</span><span class="n">${x.getDate()}</span><span class="dot" style="background:${dot}"></span></div>`;
+    const sel = (S.daySel || today) === s;
+    return `<button class="wd ${s === today ? 'today' : ''} ${sel && s !== today ? 'sel' : ''}" data-a="wpick" data-day="${s}" aria-pressed="${sel}" aria-label="${esc(fmtDay(s, { weekday: 'long', day: 'numeric', month: 'long' }))}"><span class="l">${l}</span><span class="n">${x.getDate()}</span><span class="dot" style="background:${dot}"></span></button>`;
   }).join('') + `</div>`;
 }
 
-function medCardHtml(m) {
-  const today = todayStr(); const r = S.intakes.get(k(m.id, today));
+function medCardHtml(m, day = todayStr()) {
+  const today = todayStr(); const r = S.intakes.get(k(m.id, day));
+  const future = day > today, past = day < today;
   const taken = r && r.status === 'taken'; const skipped = r && r.status === 'skipped';
   let sub = `${m.dose_label} · ${m.window_label || planHM(m)}${m.note ? ' · ' + m.note : ''}`;
   let hint = '', hintOk = false;
@@ -221,16 +223,18 @@ function medCardHtml(m) {
     if (/до їжі/.test(m.note || '')) { hint = 'Їсти можна з ' + addMin(timeOf(r), 120); hintOk = true; }
   } else if (skipped) {
     sub = 'Пропущено' + (r.note ? ' · ' + r.note : '');
-  } else if (/після їжі/.test(m.note || '')) {
+  } else if (!future && /після їжі/.test(m.note || '')) {
     const pre = activeMeds().find((x) => /до їжі/.test(x.note || ''));
-    const pr = pre && S.intakes.get(k(pre.id, today));
+    const pr = pre && S.intakes.get(k(pre.id, day));
     hint = pr && pr.status === 'taken' ? `Спершу поїсти (можна з ${addMin(timeOf(pr), 120)})` : 'Спершу поїсти';
   }
   const right = taken ? `<span class="chip ok">${ICON_CHECK}${timeOf(r)}</span>`
     : skipped ? `<span class="chip skip">Пропуск</span>`
+    : future ? `<span class="chip plan">${planHM(m)}</span>`
+    : past ? `<button class="btn-quick" data-a="open" data-id="${m.id}" data-day="${day}" aria-label="Відмітити ${esc(m.name)}">Відмітити</button>`
     : `<button class="btn-quick" data-a="quick" data-id="${m.id}" aria-label="Відмітити ${esc(m.name)} зараз">Прийняла</button>`;
   return `<div class="card ${taken ? 'taken' : skipped ? 'skipped' : ''}">
-    <button class="main" data-a="open" data-id="${m.id}" data-day="${today}" aria-label="Деталі: ${esc(m.name)}">
+    <button class="main" ${future ? 'disabled' : `data-a="open" data-id="${m.id}" data-day="${day}"`} aria-label="Деталі: ${esc(m.name)}">
       <span class="ico" style="background:${tint(m.color)}">${ICON_PILL(m.color)}</span>
       <span class="txt"><span class="nm">${esc(m.name)}</span><span class="sb">${esc(sub)}</span>${hint ? `<span class="hint ${hintOk ? 'ok' : ''}">${esc(hint)}</span>` : ''}</span>
     </button>${right}</div>`;
@@ -240,25 +244,31 @@ function lastIntake(m) {
   let best = null; for (const r of S.intakes.values()) if (r.med_id === m.id && r.status === 'taken' && (!best || r.day > best.day)) best = r; return best;
 }
 
-function injHtml(m) {
-  const today = todayStr(); const r = S.intakes.get(k(m.id, today));
-  const done = r && r.status === 'taken';
+function injHtml(m, day = todayStr()) {
+  const today = todayStr(); const r = S.intakes.get(k(m.id, day));
+  const done = r && r.status === 'taken'; const future = day > today;
+  const when = day === today ? 'Сьогодні' : fmtDay(day, { weekday: 'long' }).replace(/^./, (c) => c.toUpperCase());
   let sub, site;
-  if (done) { sub = `Зроблено сьогодні о ${timeOf(r)}`; site = r.site || ''; }
-  else if (r) { sub = 'Сьогодні — пропуск'; site = ''; }
-  else { sub = `Сьогодні, ${planHM(m)} · ${m.dose_label}`; site = 'Місце: ' + suggestSite(m).toLowerCase(); }
+  if (done) { sub = `Зроблено о ${timeOf(r)}`; site = r.site || ''; }
+  else if (r) { sub = `${when} — пропуск`; site = ''; }
+  else { sub = `${when}, ${planHM(m)} · ${m.dose_label}`; site = 'Місце: ' + suggestSite(m).toLowerCase(); }
   return `<div class="inj"><span class="ico">${ICON_SYR('#d8cffc')}</span>
     <span class="txt" style="flex:1"><span class="nm">${esc(m.name)}</span><span class="sb">${esc(sub)}</span>${site ? `<span class="site">${esc(site)}</span>` : ''}</span>
-    <button class="act ${r ? 'done' : ''}" data-a="open" data-id="${m.id}" data-day="${today}">${r ? 'Деталі' : 'Відмітити'}</button></div>`;
+    ${future ? `<span class="chip plan" style="background:#463d66;color:#fff">${planHM(m)}</span>` : `<button class="act ${r ? 'done' : ''}" data-a="open" data-id="${m.id}" data-day="${day}">${r ? 'Деталі' : 'Відмітити'}</button>`}</div>`;
 }
 
 function todayView() {
-  const ms = dayMeds(todayStr());
+  const today = todayStr(); const day = S.daySel || today;
+  const ms = dayMeds(day);
   const pills = ms.filter((m) => !m.track_sites); const inj = ms.filter((m) => m.track_sites);
-  const empty = !ms.length ? '<div class="panel"><p>Сьогодні нічого не заплановано.</p></div>' : '';
+  const isToday = day === today, future = day > today;
+  const title = isToday ? 'Сьогодні' : fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' });
+  const tip = isToday ? 'Картка — деталі, кнопка — швидко' : future ? 'План на цей день' : 'Можна відмітити заднім числом';
+  const empty = !ms.length ? `<div class="panel"><p>${isToday ? 'Сьогодні' : 'Цього дня'} нічого не заплановано.</p></div>` : '';
+  const back = isToday ? '' : '<button class="btn link" data-a="wpick" data-day="">← Повернутись до сьогодні</button>';
   return headerHtml() + weekHtml() +
-    `<div class="sec"><h2>Сьогодні</h2><span class="tip">Картка — деталі, кнопка — швидко</span></div>
-     <div class="list">${pills.map(medCardHtml).join('')}</div>` + inj.map(injHtml).join('') + empty;
+    `<div class="sec"><h2>${esc(title)}</h2><span class="tip">${tip}</span></div>
+     <div class="list">${pills.map((m) => medCardHtml(m, day)).join('')}</div>` + inj.map((m) => injHtml(m, day)).join('') + empty + back;
 }
 
 function historyView() {
@@ -596,7 +606,7 @@ function render() {
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-a]'); if (!el) return;
   const a = el.dataset.a; const sh = S.sheet;
-  if (a === 'nav') { S.view = el.dataset.v; if (S.view === 'history') { S.sel = null; S.month = null; } render(); window.scrollTo(0, 0); }
+  if (a === 'nav') { S.view = el.dataset.v; S.daySel = null; if (S.view === 'history') { S.sel = null; S.month = null; } render(); window.scrollTo(0, 0); }
   else if (a === 'open') openSheet(el.dataset.id, el.dataset.day);
   else if (a === 'quick') {
     const m = S.meds.find((x) => x.id === el.dataset.id); const day = todayStr(); const now = new Date();
@@ -623,6 +633,7 @@ document.addEventListener('click', async (e) => {
     const { error } = await sb.from('snoozes').insert({ med_id: m.id, day, due_at: due.toISOString() });
     if (error) toast('Не вдалося: ' + error.message); else quickDone(`Нагадаю о ${hm(due)}`);
   }
+  else if (a === 'wpick') { const d = el.dataset.day; S.daySel = d && d !== todayStr() ? d : null; render(); }
   else if (a === 'edopen') openEditor(el.dataset.id);
   else if (a === 'ednew') openEditor(null);
   else if (a === 'edclose') { S.ed = null; renderEditor(); }

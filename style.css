@@ -23,11 +23,14 @@ button{cursor:pointer}
 
 /* week */
 .week{margin:6px 22px 4px;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
-.wd{display:flex;flex-direction:column;align-items:center;gap:4px;padding:7px 0;border-radius:14px}
+.wd{border:0;background:transparent;color:var(--ink);font-family:inherit;display:flex;flex-direction:column;align-items:center;gap:4px;padding:7px 0;border-radius:14px}
 .wd .l{font-size:11px;font-weight:600;color:var(--muted)}
 .wd .n{font-size:15px;font-weight:800}
 .wd .dot{width:7px;height:7px;border-radius:50%}
 .wd.today{background:var(--plum);color:#fff}
+.wd.sel{background:var(--accent-soft);box-shadow:inset 0 0 0 2px var(--accent)}
+.chip.plan{background:var(--accent-soft);color:var(--accent-ink)}
+.card .main:disabled{cursor:default;opacity:1}
 .wd.today .l{color:var(--plum-muted)}
 
 .sec{padding:14px 22px 0;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
