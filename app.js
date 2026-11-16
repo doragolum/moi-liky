@@ -348,7 +348,7 @@ function medsView() {
         ${linked ? `<button class="sw" role="switch" aria-checked="${!!st.notify_telegram}" aria-label="Нагадування в Telegram" data-a="tgtoggle"></button>` : ''}</div>
     </div>
     <div class="panel"><h3>На головний екран</h3><p>iPhone: Safari → «Поділитися» → «На екран „Додому“». Android: Chrome → ⋮ → «Додати на головний екран».</p></div>
-    <div class="panel"><button class="btn ghost" data-a="logout">Вийти з акаунта</button></div>`;
+    <div class="panel"><button class="btn ghost" data-a="logout">Вийти з акаунта</button><p style="font-size:12px;text-align:center">Версія ${APP_VERSION}</p></div>`;
 }
 
 function pushPanel() {
@@ -763,4 +763,15 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+const APP_VERSION = 11;
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
+    reg.update().catch(() => {});
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+  }).catch(() => {});
+  // коли встановилась нова версія — один раз перезавантажити сторінку
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloaded || S.sheet || S.ed || S.quick) return; reloaded = true; location.reload();
+  });
+}

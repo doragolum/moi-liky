@@ -1,10 +1,11 @@
 // Простий service worker: оболонка додатку з кешу, щоб відкривався миттєво.
 // Дані завжди беруться з мережі (Supabase).
-const CACHE = 'moi-liky-v10';
+const CACHE = 'moi-liky-v11';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' — брати файли з мережі, а не зі старого кешу браузера
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
@@ -35,10 +36,15 @@ self.addEventListener('notificationclick', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
-  // stale-while-revalidate для файлів додатку
-  e.respondWith(caches.open(CACHE).then(async (c) => {
-    const hit = await c.match(e.request);
-    const net = fetch(e.request).then((r) => { if (r.ok) c.put(e.request, r.clone()); return r; }).catch(() => hit);
-    return hit || net;
-  }));
+  // спершу мережа (свіжа версія), без мережі — збережена копія
+  e.respondWith((async () => {
+    const c = await caches.open(CACHE);
+    try {
+      const r = await fetch(e.request, { cache: 'no-cache' });
+      if (r.ok && !url.search) c.put(e.request, r.clone());
+      return r;
+    } catch (_) {
+      return (await c.match(e.request, { ignoreSearch: true })) || (await c.match('./')) || Response.error();
+    }
+  })());
 });
