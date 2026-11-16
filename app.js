@@ -767,8 +767,6 @@ const APP_VERSION = 12;
 // заборона зуму щипком і подвійним тапом (iOS ігнорує user-scalable=no у деяких режимах)
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 && e.cancelable) e.preventDefault(); }, { passive: false });
-let lastTouchEnd = 0;
-document.addEventListener('touchend', (e) => { const now = Date.now(); if (now - lastTouchEnd < 300 && e.cancelable && !e.target.closest('input,textarea,select')) e.preventDefault(); lastTouchEnd = now; }, { passive: false });
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((reg) => {
     reg.update().catch(() => {});
