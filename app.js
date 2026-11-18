@@ -666,7 +666,10 @@ function mjWeight() {
       <div class="opts"><label class="lbl">Вага, кг<input type="number" step="0.1" inputmode="decimal" data-bin="w" placeholder="напр. 107,4"></label><label class="lbl">Талія, см<input type="number" step="0.5" inputmode="decimal" data-bin="waist" placeholder="раз на 2–4 тиж."></label></div>
       <button class="btn" data-a="mjbody">Зберегти за сьогодні</button>
       <p style="font-size:12px">Зважуйся в той самий день тижня, зранку, після туалету — так цифри можна порівнювати.</p></div>
-    ${list ? `<div class="panel"><h3>Історія</h3>${list}</div>` : ''}`;
+    ${list ? `<div class="panel"><h3>Історія</h3>${list}</div>` : ''}
+    <div class="panel"><h3>Старт і ціль</h3>
+      <div class="opts"><label class="lbl">Стартова вага, кг<input type="number" step="0.1" inputmode="decimal" data-gin="start" value="${st.weight_start ?? ''}"></label><label class="lbl">Ціль, кг<input type="number" step="0.1" inputmode="decimal" data-gin="goal" value="${st.weight_goal ?? ''}"></label></div>
+      <button class="btn ghost" data-a="mjgoal">Зберегти старт і ціль</button></div>`;
 }
 
 function mjActivity() {
@@ -746,6 +749,12 @@ document.addEventListener('click', async (e) => {
     const { data, error } = await sb.from('body_logs').upsert(row, { onConflict: 'user_id,day' }).select().single();
     if (error) return toast('Не вдалося зберегти: ' + error.message);
     S.mj.body = S.mj.body.filter((b) => b.day !== today).concat(data).sort((x, y) => x.day < y.day ? -1 : 1); render(); toast('Збережено');
+  }
+  else if (a === 'mjgoal') {
+    const num = (f) => { const v = parseFloat(String(document.querySelector(`[data-gin="${f}"]`)?.value || '').replace(',', '.')); return v > 30 && v < 300 ? Math.round(v * 10) / 10 : null; };
+    const ws = num('start'), wg = num('goal');
+    if (ws == null && wg == null) return toast('Введи вагу від 30 до 300 кг');
+    await updateSettings({ weight_start: ws, weight_goal: wg }); toast('Старт і ціль збережено');
   }
   else if (a === 'mjbdel') { const id = el.dataset.id; await sb.from('body_logs').delete().eq('id', id); S.mj.body = S.mj.body.filter((b) => b.id !== id); render(); }
   else if (a === 'mjact') {
@@ -1022,7 +1031,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 14;
+const APP_VERSION = 15;
 // заборона зуму щипком і подвійним тапом (iOS ігнорує user-scalable=no у деяких режимах)
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 && e.cancelable) e.preventDefault(); }, { passive: false });
