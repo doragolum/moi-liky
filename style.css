@@ -6,7 +6,7 @@
   --safe-b: env(safe-area-inset-bottom, 0px);
 }
 *{box-sizing:border-box}
-html,body{touch-action:pan-x pan-y;-webkit-text-size-adjust:100%;text-size-adjust:100%;margin:0;background:var(--bg);color:var(--ink);font-family:Manrope,system-ui,sans-serif;-webkit-tap-highlight-color:transparent}
+html,body{overscroll-behavior-x:none;touch-action:pan-x pan-y;-webkit-text-size-adjust:100%;text-size-adjust:100%;margin:0;background:var(--bg);color:var(--ink);font-family:Manrope,system-ui,sans-serif;-webkit-tap-highlight-color:transparent}
 button,input,textarea{font-family:inherit;font-size:inherit;color:inherit}
 button{cursor:pointer}
 .boot{min-height:100vh;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:22px;color:var(--muted)}

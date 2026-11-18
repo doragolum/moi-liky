@@ -912,6 +912,39 @@ document.addEventListener('touchend', () => {
   } else { sh.style.transform = ''; if (ov) ov.style.background = ''; }
 });
 
+// ---------- свайп «назад» (як в iPhone: від лівого краю вправо) ----------
+function canGoBack() { return (S.view === 'mj' && S.mjSub) || (S.view === 'today' && S.daySel); }
+function goBack() {
+  if (S.view === 'mj' && S.mjSub) { S.mjSub = null; S.ck = null; S.sleepDraft = null; }
+  else if (S.view === 'today' && S.daySel) S.daySel = null;
+  render(); window.scrollTo(0, 0);
+}
+let sw = null;
+document.addEventListener('touchstart', (e) => {
+  if (S.sheet || S.ed || S.quick || !canGoBack()) return;
+  if (e.target.closest('input,textarea,select,.sh')) return;
+  const t = e.touches[0]; sw = { x: t.clientX, y: t.clientY, dx: 0, on: false, edge: t.clientX < 40 };
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (!sw) return;
+  const t = e.touches[0]; const dx = t.clientX - sw.x, dy = t.clientY - sw.y;
+  if (!sw.on) {
+    if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { sw = null; return; } // вертикальна прокрутка
+    if (dx > 12 && dx > Math.abs(dy) * 1.5) sw.on = true; else return;
+  }
+  sw.dx = Math.max(0, dx);
+  const main = document.querySelector('main.wrap');
+  if (main) { main.style.transition = 'none'; main.style.transform = `translateX(${sw.dx}px)`; main.style.opacity = String(1 - Math.min(0.4, sw.dx / 800)); }
+  if (e.cancelable) e.preventDefault();
+}, { passive: false });
+document.addEventListener('touchend', () => {
+  if (!sw) return; const { dx, on, edge } = sw; sw = null; if (!on) return;
+  const main = document.querySelector('main.wrap'); if (!main) return;
+  main.style.transition = 'transform .2s ease, opacity .2s ease';
+  if (dx > (edge ? 60 : 110)) { main.style.transform = 'translateX(100%)'; main.style.opacity = '0'; setTimeout(goBack, 180); }
+  else { main.style.transform = ''; main.style.opacity = ''; }
+});
+
 // ---------- render ----------
 function render() {
   if (!S.user) return;
@@ -1055,7 +1088,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 16;
+const APP_VERSION = 17;
 // заборона зуму щипком і подвійним тапом (iOS ігнорує user-scalable=no у деяких режимах)
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 && e.cancelable) e.preventDefault(); }, { passive: false });
