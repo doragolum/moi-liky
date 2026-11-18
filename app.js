@@ -76,6 +76,7 @@ async function loadAll() {
   S.meds = meds || [];
   S.intakes = new Map((ints || []).map((r) => [k(r.med_id, r.day), r]));
   S.settings = st;
+  await loadMj();
 }
 
 async function ensureSeed() {
@@ -374,6 +375,7 @@ function navHtml() {
   const b = (v, label, svg) => `<button class="${S.view === v ? 'on' : ''}" data-a="nav" data-v="${v}">${svg}${label}</button>`;
   return `<nav class="nav">${b('today', 'Сьогодні', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>')}
     ${b('history', 'Історія', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>')}
+    ${b('mj', 'Мунджаро', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/></svg>')}
     ${b('meds', 'Мої ліки', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>')}</nav>`;
 }
 
@@ -400,6 +402,8 @@ const ICON_CHECK_L = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none
 
 function openQuickFromUrl(href) {
   let u; try { u = new URL(href || location.href); } catch (_) { return; }
+  const cslot = u.searchParams.get('c');
+  if (cslot && SLOTS.some((x) => x.id === cslot)) { history.replaceState(null, '', location.pathname); S.sheet = null; renderSheet(); openCheckin(cslot); return; }
   const id = u.searchParams.get('q'); if (!id) return;
   const day = u.searchParams.get('d') || todayStr();
   const late = u.searchParams.get('f') === '1';
@@ -517,6 +521,258 @@ function renderSheet() {
     <div class="sh"><span class="grab"></span><div class="shh"><div><div class="ttl">${esc(m.name)}</div><div class="sub">${esc(m.dose_label)} · ${esc(dayLbl)} · план ${planHM(m)}${m.note ? ' · ' + esc(m.note) : ''}</div></div><button class="shx" data-a="sclose" aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>${body}</div></div>`;
 }
 
+// ---------- Мунджаро: самопочуття, вода, сон, вага, активність ----------
+const SLOTS = [{ id: 'morning', name: 'Ранок' }, { id: 'day', name: 'День' }, { id: 'evening', name: 'Вечір' }];
+const SYMPTOMS = ['Нудота', 'Печія / відрижка', 'Здуття', 'Закреп', 'Діарея', 'Біль у животі', 'Блювання'];
+const EXERCISES = [['Вставання зі стільця', '2 × 8'], ['Віджимання від стіни', '2 × 8–10'], ['Тяга еспандера', '2 × 10'], ['Сідничний місток', '2 × 10']];
+const slotTimes = () => S.settings?.checkin_times?.length === 3 ? S.settings.checkin_times : ['10:30', '16:00', '22:30'];
+const litres = (ml) => (Math.round(ml / 100) / 10).toLocaleString('uk-UA', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const ICON_BACK = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>';
+
+async function loadMj() {
+  const since = new Date(); since.setDate(since.getDate() - 200); const s = ymd(since);
+  const [c, w, b, a] = await Promise.all([
+    sb.from('checkins').select('*').gte('day', s),
+    sb.from('water_logs').select('*').gte('day', s).order('created_at'),
+    sb.from('body_logs').select('*').order('day'),
+    sb.from('activity_logs').select('*').gte('day', s)
+  ]);
+  S.mj = { checkins: c.data || [], water: w.data || [], body: b.data || [], activity: a.data || [] };
+}
+const injMed = () => S.meds.find((m) => m.track_sites && m.active) || S.meds.find((m) => m.track_sites);
+function firstInjection(m) {
+  let f = null; for (const r of S.intakes.values()) if (r.med_id === m.id && r.status === 'taken' && (!f || r.day < f)) f = r.day; return f;
+}
+function currentSlot() {
+  const now = hm(new Date()); const t = slotTimes();
+  if (now >= t[2]) return 'evening'; if (now >= t[1]) return 'day'; return 'morning';
+}
+const checkinOf = (day, slot) => S.mj.checkins.find((c) => c.day === day && c.slot === slot);
+const waterOn = (day) => S.mj.water.filter((w) => w.day === day).reduce((a, w) => a + w.ml, 0);
+function sleepMins(c) {
+  if (!c?.sleep_start || !c?.sleep_end) return null;
+  const toM = (t) => { const [h, m] = t.slice(0, 5).split(':').map(Number); return h * 60 + m; };
+  let d = toM(c.sleep_end) - toM(c.sleep_start); if (d < 0) d += 1440; return d;
+}
+const fmtMins = (m) => `${Math.floor(m / 60)} год${m % 60 ? ' ' + (m % 60) + ' хв' : ''}`;
+function weekDays() { const d = new Date(); const dow = (d.getDay() + 6) % 7; return [0, 1, 2, 3, 4, 5, 6].map((i) => { const x = new Date(d); x.setDate(d.getDate() - dow + i); return ymd(x); }); }
+const activityOn = (day) => S.mj.activity.find((a) => a.day === day && a.done);
+const lastBody = (f) => [...S.mj.body].reverse().find((b) => b[f] != null);
+
+function mjHead(title, sub, back = true) {
+  return `<header class="head"><div style="display:flex;align-items:center;gap:10px">${back ? `<button class="shx" data-a="mjback" aria-label="Назад">${ICON_BACK}</button>` : ''}<div><div class="date">${esc(sub)}</div><h1>${esc(title)}</h1></div></div></header>`;
+}
+
+function mjOverview() {
+  const today = todayStr(); const m = injMed(); const st = S.settings || {};
+  let prog = '', inj = '';
+  if (m) {
+    const first = firstInjection(m);
+    const dose = String(st.mj_dose_mg ?? 2.5).replace('.', ',');
+    if (first) {
+      const w = Math.floor((parseYmd(today) - parseYmd(first)) / 604800000) + 1;
+      const within = (w - 1) % 4;
+      const bars = [0, 1, 2, 3].map((i) => `<span class="wk ${i < within ? 'past' : i === within ? 'cur' : ''}"><i></i>Т${Math.floor((w - 1) / 4) * 4 + i + 1}</span>`).join('');
+      prog = `<div class="panel"><div class="row" style="color:var(--ink)"><span style="font-weight:800">Тиждень ${w} · ${dose} мг</span><span style="font-size:12px;color:var(--muted)">з ${esc(fmtDay(first, { day: 'numeric', month: 'long' }))}</span></div>
+        <div class="wks">${bars}</div><p style="font-size:12px">${within === 3 ? 'Кінець 4-тижневого етапу — обговори з лікарем, чи підвищувати дозу.' : 'Підвищення дози — лише після рішення лікаря.'}</p></div>`;
+    } else {
+      const nx = nextDue(m);
+      prog = `<div class="panel"><span style="font-weight:800">Старт програми · ${dose} мг</span><p style="font-size:13px">Перший укол: ${nx ? esc(fmtDay(nx.day, { weekday: 'long', day: 'numeric', month: 'long' })) : '—'}. Після нього тут зʼявиться відлік тижнів.</p></div>`;
+    }
+    const nx = nextDue(m); const r = S.intakes.get(k(m.id, today));
+    const sug = suggestSite(m); const ls = lastSite(m);
+    const when = r && r.status === 'taken' ? `Зроблено сьогодні о ${timeOf(r)}` : nx ? `${fmtDay(nx.day, { weekday: 'long', day: 'numeric', month: 'long' })} · ${planHM(m)}` : '';
+    const badge = r ? '' : nx ? (nx.until === 0 ? 'сьогодні' : nx.until === 1 ? 'завтра' : `через ${nx.until} дн.`) : '';
+    inj = `<button class="injbig" ${nx && nx.until === 0 ? `data-a="open" data-id="${m.id}" data-day="${today}"` : 'data-a="noop"'}>
+      <span class="row" style="color:#fff"><span style="text-align:left"><b style="display:block;font-size:16px">${r ? 'Укол' : 'Наступний укол'}</b><small style="color:var(--plum-muted);font-size:13px">${esc(when)}</small></span>${badge ? `<span class="bdg">${badge}</span>` : ''}</span>
+      <span class="sites">${SITES.map((s) => `<i class="${s === sug && !r ? 'on' : ''}">${esc(s.replace('ліворуч', 'Л').replace('праворуч', 'П').replace('ліве', 'Л').replace('праве', 'П'))}</i>`).join('')}</span>
+      <small style="color:var(--plum-muted);font-size:12px;text-align:left">${ls ? 'Минулого разу: ' + esc(ls.site.toLowerCase()) : 'Перший укол — з нього почнеться історія місць'}</small></button>`;
+  }
+  const goal = st.water_goal_ml || 3000; const wt = waterOn(today);
+  const sl = sleepMins(checkinOf(today, 'morning'));
+  const lb = lastBody('weight_kg');
+  const wd = weekDays(); const act = wd.filter((d) => activityOn(d)).length;
+  const done = SLOTS.filter((s) => checkinOf(today, s.id)).length;
+  const cs = currentSlot(); const csName = SLOTS.find((s) => s.id === cs).name.toLowerCase();
+  const tile = (sub, t, v, s2) => `<button class="tile" data-a="mjsub" data-v="${sub}"><span>${t}</span><b>${v}</b><small>${s2}</small></button>`;
+  return `<header class="head"><div><div class="date">${esc(new Date().toLocaleDateString('uk-UA', { weekday: 'long', day: 'numeric', month: 'long' }))}</div><h1>Мунджаро</h1></div></header>
+    ${prog}${inj ? `<div style="margin:12px 22px 0">${inj}</div>` : ''}
+    <div class="tiles">
+      ${tile('water', 'Вода', `${litres(wt)} / ${litres(goal)} л`, wt >= goal ? 'ціль виконано' : `ще ${litres(goal - wt)} л`)}
+      ${tile('water', 'Сон', sl != null ? fmtMins(sl) : '—', sl != null ? ['погано', 'нормально', 'добре'][checkinOf(today, 'morning')?.sleep_quality ?? 1] : 'відміть зранку')}
+      ${tile('weight', 'Вага', lb ? `${String(lb.weight_kg).replace('.', ',')} кг` : (st.weight_start ? `${String(st.weight_start).replace('.', ',')} кг` : '—'), st.weight_goal ? `ціль ${String(st.weight_goal).replace('.', ',')}` : 'додай зважування')}
+      ${tile('activity', 'Активність', `${act} / 7`, 'днів цього тижня')}
+    </div>
+    <div style="margin:12px 22px 0"><button class="btn" data-a="mjcheck" data-v="${cs}" style="width:100%;gap:10px">Самопочуття · ${csName} <span class="bdg" style="background:rgba(255,255,255,.2)">${done} з 3</span></button></div>`;
+}
+
+function mjWater() {
+  const today = todayStr(); const st = S.settings || {};
+  const goal = st.water_goal_ml || 3000, bottle = st.bottle_ml || 1180, glass = st.glass_ml || 250;
+  const wt = waterOn(today); const n = Math.ceil(goal / bottle);
+  const bottles = Array.from({ length: n }, (_, i) => {
+    const cap = Math.min(bottle, goal - i * bottle); const f = Math.max(0, Math.min(1, (wt - i * bottle) / bottle));
+    const h = Math.round(150 * f) ;
+    return `<div class="btl"><svg width="70" height="150" viewBox="0 0 90 190" aria-hidden="true">
+      <rect x="30" y="2" width="30" height="16" rx="5" fill="#2b2540"/><rect x="18" y="16" width="54" height="10" rx="4" fill="#463d66"/>
+      <clipPath id="bc${i}"><path d="M14 30 H76 L68 182 Q67 188 61 188 H29 Q23 188 22 182 Z"/></clipPath>
+      <path d="M14 30 H76 L68 182 Q67 188 61 188 H29 Q23 188 22 182 Z" fill="#ebe7fb" stroke="#d8d0fb" stroke-width="2"/>
+      <rect x="0" y="${188 - Math.round(158 * f)}" width="90" height="${Math.round(158 * f)}" fill="#3fa3e0" opacity=".85" clip-path="url(#bc${i})"/>
+      <path d="M76 50 Q90 52 88 80 Q86 104 72 104" fill="none" stroke="#463d66" stroke-width="7" stroke-linecap="round"/></svg>
+      <small>${cap < bottle ? litres(cap) + ' л' : 'пляшка ' + (i + 1)}</small></div>`;
+  }).join('');
+  const log = S.mj.water.filter((w) => w.day === today).slice().reverse().map((w) =>
+    `<div class="mrow"><span class="f">+${w.ml} мл<small>${hm(new Date(w.created_at))}</small></span><button class="shx" data-a="mjwdel" data-id="${w.id}" aria-label="Видалити">✕</button></div>`).join('');
+  const mc = checkinOf(today, 'morning'); const ck = S.sleepDraft || { start: mc?.sleep_start?.slice(0, 5) || '', end: mc?.sleep_end?.slice(0, 5) || '', q: mc?.sleep_quality ?? null };
+  S.sleepDraft = ck;
+  const sm = sleepMins({ sleep_start: ck.start, sleep_end: ck.end });
+  return mjHead('Вода і сон', 'Сьогодні') + `
+    <div class="panel">
+      <div class="row" style="color:var(--ink)"><span style="font-size:26px;font-weight:800">${litres(wt)} <span style="font-size:15px;color:var(--muted)">з ${litres(goal)} л</span></span><span style="font-size:12px">${wt >= goal ? 'ціль виконано' : 'ще ' + litres(goal - wt) + ' л'}</span></div>
+      <div class="btls">${bottles}</div>
+      <div class="opts" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+        <button class="opt" data-a="mjw" data-v="${Math.round(bottle / 2)}">½ пляшки</button>
+        <button class="opt on" data-a="mjw" data-v="${bottle}">Пляшка</button>
+        <button class="opt" data-a="mjw" data-v="${glass}">Склянка</button></div>
+      <p style="font-size:12px">Пляшка Stanley — ${litres(bottle)} л, склянка — ${glass} мл. Пий потроху протягом дня.</p>
+      ${log}
+    </div>
+    <div class="panel"><h3>Сон минулої ночі</h3>
+      <div class="opts"><label class="lbl">Заснула<input type="time" data-sin="start" value="${esc(ck.start)}"></label><label class="lbl">Прокинулась<input type="time" data-sin="end" value="${esc(ck.end)}"></label></div>
+      <div class="seg">${['Погано', 'Нормально', 'Добре'].map((l, i) => `<button type="button" class="${ck.q === i ? 'on' : ''}" data-a="mjsq" data-v="${i}">${l}</button>`).join('')}</div>
+      ${sm != null ? `<p style="font-size:13px">Тривалість: <b>${fmtMins(sm)}</b></p>` : ''}
+      <button class="btn" data-a="mjsleep">Зберегти сон</button></div>`;
+}
+
+function mjWeight() {
+  const st = S.settings || {}; const rows = S.mj.body.filter((b) => b.weight_kg != null);
+  const start = Number(st.weight_start || rows[0]?.weight_kg || 0), goal = Number(st.weight_goal || 0);
+  let chart = '';
+  if (start) {
+    const pts = [{ day: 'старт', v: start }, ...rows.map((r) => ({ day: r.day, v: Number(r.weight_kg) }))].slice(-12);
+    const vals = pts.map((p) => p.v).concat(goal ? [goal] : []); const hi = Math.max(...vals) + 1, lo = Math.min(...vals) - 1;
+    const X = (i) => 20 + i * (290 / Math.max(1, pts.length - 1)), Y = (v) => 10 + (hi - v) / (hi - lo) * 100;
+    chart = `<svg viewBox="0 0 320 120" width="100%" role="img" aria-label="Графік ваги">
+      ${goal ? `<line x1="10" x2="315" y1="${Y(goal)}" y2="${Y(goal)}" stroke="#9bd43f" stroke-width="2" stroke-dasharray="5 5"/><text x="312" y="${Y(goal) - 5}" font-size="10" text-anchor="end" fill="#4d7c0f">ціль ${goal}</text>` : ''}
+      ${pts.length > 1 ? `<polyline fill="none" stroke="#6c5ce7" stroke-width="3" stroke-linejoin="round" points="${pts.map((p, i) => `${X(i)},${Y(p.v)}`).join(' ')}"/>` : ''}
+      ${pts.map((p, i) => `<circle cx="${X(i)}" cy="${Y(p.v)}" r="5" fill="#6c5ce7"/>`).join('')}</svg>`;
+  }
+  const cur = rows.length ? Number(rows[rows.length - 1].weight_kg) : start;
+  const list = [...S.mj.body].reverse().slice(0, 8).map((b) => `<div class="mrow"><span class="f"><b>${esc(fmtDay(b.day, { day: 'numeric', month: 'long' }))}</b><small>${b.weight_kg != null ? String(b.weight_kg).replace('.', ',') + ' кг' : ''}${b.weight_kg != null && b.waist_cm != null ? ' · ' : ''}${b.waist_cm != null ? 'талія ' + String(b.waist_cm).replace('.', ',') + ' см' : ''}</small></span><button class="shx" data-a="mjbdel" data-id="${b.id}" aria-label="Видалити">✕</button></div>`).join('');
+  return mjHead('Вага й обʼєми', 'Раз на тиждень, зранку') + `
+    <div class="panel"><div class="row" style="color:var(--ink)"><span style="font-size:28px;font-weight:800">${cur ? String(cur).replace('.', ',') : '—'} <span style="font-size:15px;color:var(--muted)">кг</span></span>
+      <span style="font-size:12px">${start && cur ? (cur <= start ? '−' : '+') + String(Math.abs(Math.round((start - cur) * 10) / 10)).replace('.', ',') + ' кг від старту' : ''}${goal && cur ? ' · до цілі ' + String(Math.max(0, Math.round((cur - goal) * 10) / 10)).replace('.', ',') : ''}</span></div>${chart}</div>
+    <div class="panel"><h3>Новий запис</h3>
+      <div class="opts"><label class="lbl">Вага, кг<input type="number" step="0.1" inputmode="decimal" data-bin="w" placeholder="напр. 107,4"></label><label class="lbl">Талія, см<input type="number" step="0.5" inputmode="decimal" data-bin="waist" placeholder="раз на 2–4 тиж."></label></div>
+      <button class="btn" data-a="mjbody">Зберегти за сьогодні</button>
+      <p style="font-size:12px">Зважуйся в той самий день тижня, зранку, після туалету — так цифри можна порівнювати.</p></div>
+    ${list ? `<div class="panel"><h3>Історія</h3>${list}</div>` : ''}`;
+}
+
+function mjActivity() {
+  const plan = S.settings?.activity_plan || []; const today = todayStr();
+  const rows = weekDays().map((d) => {
+    const dow = parseYmd(d).getDay(); const p = plan.find((x) => x.dow === dow); const on = !!activityOn(d);
+    return `<button class="arow ${d === today ? 'today' : ''}" data-a="mjact" data-day="${d}" ${d > today ? 'disabled' : ''}><span class="cb ${on ? 'on' : ''}">${on ? ICON_CHECK : ''}</span><b>${WD[(dow + 6) % 7]}</b><span>${esc(p?.title || '—')}</span></button>`;
+  }).join('');
+  return mjHead('Активність', 'Цей тиждень · за самопочуттям') + `
+    <div class="panel" style="gap:0">${rows}</div>
+    <div class="panel"><h3>Силове вдома · вт, пт</h3>${EXERCISES.map(([a, b]) => `<div class="row" style="color:var(--ink);font-weight:500"><span>${a}</span><b>${b}</b></div>`).join('')}
+      <p style="font-size:12px">Болить — не роби через силу, зменш амплітуду.</p></div>`;
+}
+
+function openCheckin(slot) {
+  const today = todayStr(); const c = checkinOf(today, slot);
+  S.ck = { slot, symptoms: new Set(c?.symptoms || []), severity: c?.severity ?? null, appetite: c?.appetite ?? null, energy: c?.energy ?? null, protein: c?.protein ?? null,
+    sleep_start: c?.sleep_start?.slice(0, 5) || '', sleep_end: c?.sleep_end?.slice(0, 5) || '', sleep_quality: c?.sleep_quality ?? null, note: c?.note || '' };
+  S.view = 'mj'; S.mjSub = 'checkin'; render(); window.scrollTo(0, 0);
+}
+function mjCheckin() {
+  const today = todayStr(); const c = S.ck; const t = slotTimes();
+  const segq = (field, labels) => `<div class="seg">${labels.map((l, i) => `<button type="button" class="${c[field] === i ? 'on' : ''}" data-a="mjcf" data-f="${field}" data-v="${i}">${l}</button>`).join('')}</div>`;
+  const tabs = SLOTS.map((s, i) => { const d = !!checkinOf(today, s.id); return `<button class="slot ${c.slot === s.id ? 'on' : ''} ${d ? 'done' : ''}" data-a="mjcheck" data-v="${s.id}"><b>${s.name}</b><small>${t[i]}${d ? ' · ✓' : ''}</small></button>`; }).join('');
+  const none = c.symptoms.size === 0;
+  const danger = c.severity === 3 || ((c.symptoms.has('Біль у животі') || c.symptoms.has('Блювання')) && c.severity >= 2);
+  return mjHead('Самопочуття', fmtDay(today, { weekday: 'long', day: 'numeric', month: 'long' })) + `
+    <div class="slots">${tabs}</div>
+    ${c.slot === 'morning' ? `<div class="panel"><h3>Сон</h3><div class="opts"><label class="lbl">Заснула<input type="time" data-cin="sleep_start" value="${esc(c.sleep_start)}"></label><label class="lbl">Прокинулась<input type="time" data-cin="sleep_end" value="${esc(c.sleep_end)}"></label></div>${segq('sleep_quality', ['Погано', 'Нормально', 'Добре'])}</div>` : ''}
+    <div class="panel"><h3>Що зараз відчуваєш?</h3><div class="chips">${SYMPTOMS.map((s) => `<button type="button" class="opt ${c.symptoms.has(s) ? 'on' : ''}" data-a="mjsym" data-v="${esc(s)}">${esc(s)}</button>`).join('')}<button type="button" class="opt ${none ? 'on' : ''}" data-a="mjsym" data-v="">Нічого</button></div></div>
+    <div class="panel"><h3>Наскільки сильно?</h3>${segq('severity', ['Немає', 'Легко', 'Помірно', 'Сильно'])}</div>
+    ${danger ? '<div class="panel warn"><b>Будь уважна</b><p>Сильний постійний біль у животі (особливо з віддачею в спину), багаторазове блювання, неможливість пити, сильне запаморочення або дуже мало сечі — звернись до лікаря терміново.</p></div>' : ''}
+    <div class="panel"><h3>Апетит</h3>${segq('appetite', ['Звичайний', 'Знизився', 'Майже нема'])}</div>
+    <div class="panel"><h3>Енергія</h3>${segq('energy', ['Мало', 'Норм', 'Багато'])}</div>
+    ${c.slot === 'evening' ? `<div class="panel"><h3>Білок за день</h3>${segq('protein', ['Мало', 'Норм', 'Добре'])}</div>` : ''}
+    <div class="panel"><label class="lbl">Коментар (не обовʼязково)<textarea rows="2" data-cin="note">${esc(c.note)}</textarea></label>
+      <button class="btn" data-a="mjcsave">Зберегти · ${SLOTS.find((s) => s.id === c.slot).name.toLowerCase()}</button></div>
+    <div class="panel"><div class="nrow"><span>Нагадування<small>${t.join(', ')} — на телефон і в Telegram</small></span><button class="sw" role="switch" aria-checked="${!!S.settings?.checkin_reminders}" data-a="mjrem" aria-label="Нагадування про самопочуття"></button></div></div>`;
+}
+
+function mjView() {
+  if (!S.mj) return '<div class="boot">Завантаження…</div>';
+  if (S.mjSub === 'water') return mjWater();
+  if (S.mjSub === 'weight') return mjWeight();
+  if (S.mjSub === 'activity') return mjActivity();
+  if (S.mjSub === 'checkin' && S.ck) return mjCheckin();
+  return mjOverview();
+}
+
+document.addEventListener('click', async (e) => {
+  const el = e.target.closest('[data-a]'); if (!el || !el.dataset.a.startsWith('mj')) return;
+  const a = el.dataset.a; const today = todayStr();
+  if (a === 'mjback') { S.mjSub = null; S.sleepDraft = null; render(); window.scrollTo(0, 0); }
+  else if (a === 'mjsub') { S.mjSub = el.dataset.v; S.sleepDraft = null; render(); window.scrollTo(0, 0); }
+  else if (a === 'mjcheck') openCheckin(el.dataset.v);
+  else if (a === 'mjw') {
+    const ml = Number(el.dataset.v);
+    const { data, error } = await sb.from('water_logs').insert({ day: today, ml }).select().single();
+    if (error) return toast('Не вдалося зберегти');
+    S.mj.water.push(data); render(); toast(`+${ml} мл`, async () => { S.toast = null; renderToast(); await sb.from('water_logs').delete().eq('id', data.id); S.mj.water = S.mj.water.filter((w) => w.id !== data.id); render(); });
+  }
+  else if (a === 'mjwdel') { const id = el.dataset.id; await sb.from('water_logs').delete().eq('id', id); S.mj.water = S.mj.water.filter((w) => w.id !== id); render(); }
+  else if (a === 'mjsq') { S.sleepDraft.q = Number(el.dataset.v); render(); }
+  else if (a === 'mjsleep') {
+    const d = S.sleepDraft; const prev = checkinOf(today, 'morning');
+    const row = { day: today, slot: 'morning', sleep_start: d.start || null, sleep_end: d.end || null, sleep_quality: d.q, symptoms: prev?.symptoms || [] };
+    const { data, error } = await sb.from('checkins').upsert(row, { onConflict: 'user_id,day,slot' }).select().single();
+    if (error) return toast('Не вдалося зберегти: ' + error.message);
+    S.mj.checkins = S.mj.checkins.filter((c) => !(c.day === today && c.slot === 'morning')).concat(data); S.sleepDraft = null; render(); toast('Сон збережено');
+  }
+  else if (a === 'mjbody') {
+    const w = parseFloat(String(document.querySelector('[data-bin="w"]')?.value || '').replace(',', '.'));
+    const waist = parseFloat(String(document.querySelector('[data-bin="waist"]')?.value || '').replace(',', '.'));
+    if (!(w > 30 && w < 300) && !(waist > 30 && waist < 250)) return toast('Введи вагу або талію');
+    const prev = S.mj.body.find((b) => b.day === today);
+    const row = { day: today, weight_kg: w > 30 && w < 300 ? w : prev?.weight_kg ?? null, waist_cm: waist > 30 && waist < 250 ? waist : prev?.waist_cm ?? null };
+    const { data, error } = await sb.from('body_logs').upsert(row, { onConflict: 'user_id,day' }).select().single();
+    if (error) return toast('Не вдалося зберегти: ' + error.message);
+    S.mj.body = S.mj.body.filter((b) => b.day !== today).concat(data).sort((x, y) => x.day < y.day ? -1 : 1); render(); toast('Збережено');
+  }
+  else if (a === 'mjbdel') { const id = el.dataset.id; await sb.from('body_logs').delete().eq('id', id); S.mj.body = S.mj.body.filter((b) => b.id !== id); render(); }
+  else if (a === 'mjact') {
+    const d = el.dataset.day; const cur = S.mj.activity.find((x) => x.day === d);
+    if (cur && cur.done) { await sb.from('activity_logs').delete().eq('id', cur.id); S.mj.activity = S.mj.activity.filter((x) => x.id !== cur.id); }
+    else { const { data, error } = await sb.from('activity_logs').upsert({ day: d, done: true }, { onConflict: 'user_id,day' }).select().single(); if (error) return toast('Не вдалося зберегти'); S.mj.activity = S.mj.activity.filter((x) => x.day !== d).concat(data); }
+    render();
+  }
+  else if (a === 'mjsym') { const v = el.dataset.v; if (!v) S.ck.symptoms.clear(); else if (S.ck.symptoms.has(v)) S.ck.symptoms.delete(v); else S.ck.symptoms.add(v); render(); }
+  else if (a === 'mjcf') { const f = el.dataset.f; const v = Number(el.dataset.v); S.ck[f] = S.ck[f] === v ? null : v; render(); }
+  else if (a === 'mjcsave') {
+    const c = S.ck;
+    const row = { day: today, slot: c.slot, symptoms: [...c.symptoms], severity: c.severity, appetite: c.appetite, energy: c.energy, protein: c.slot === 'evening' ? c.protein : null,
+      sleep_start: c.slot === 'morning' ? c.sleep_start || null : null, sleep_end: c.slot === 'morning' ? c.sleep_end || null : null, sleep_quality: c.slot === 'morning' ? c.sleep_quality : null, note: c.note.trim() || null };
+    const { data, error } = await sb.from('checkins').upsert(row, { onConflict: 'user_id,day,slot' }).select().single();
+    if (error) return toast('Не вдалося зберегти: ' + error.message);
+    S.mj.checkins = S.mj.checkins.filter((x) => !(x.day === today && x.slot === c.slot)).concat(data);
+    S.mjSub = null; S.ck = null; render(); window.scrollTo(0, 0); toast('Самопочуття збережено');
+  }
+  else if (a === 'mjrem') updateSettings({ checkin_reminders: !S.settings.checkin_reminders });
+});
+document.addEventListener('input', (e) => {
+  const d = e.target.dataset || {};
+  if (d.cin && S.ck) S.ck[d.cin] = e.target.value;
+  if (d.sin && S.sleepDraft) S.sleepDraft[d.sin] = e.target.value;
+});
+
 // ---------- med editor ----------
 const COLORS = ['#e6a700', '#3fa3e0', '#e66aa8', '#6c5ce7', '#2bb39a', '#f0784a', '#8a7f9e'];
 function openEditor(id) {
@@ -626,7 +882,7 @@ document.addEventListener('touchend', () => {
 // ---------- render ----------
 function render() {
   if (!S.user) return;
-  const v = S.view === 'history' ? historyView() : S.view === 'meds' ? medsView() : todayView();
+  const v = S.view === 'history' ? historyView() : S.view === 'meds' ? medsView() : S.view === 'mj' ? mjView() : todayView();
   $('#app').innerHTML = `<main class="wrap">${v}</main>${navHtml()}`;
   if (S.sheet) renderSheet();
   if (S.quick) renderQuick();
@@ -636,7 +892,7 @@ function render() {
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-a]'); if (!el) return;
   const a = el.dataset.a; const sh = S.sheet;
-  if (a === 'nav') { S.view = el.dataset.v; S.daySel = null; if (S.view === 'history') { S.sel = null; S.month = null; } render(); window.scrollTo(0, 0); }
+  if (a === 'nav') { S.view = el.dataset.v; S.daySel = null; S.mjSub = null; S.ck = null; if (S.view === 'history') { S.sel = null; S.month = null; } render(); window.scrollTo(0, 0); }
   else if (a === 'open') openSheet(el.dataset.id, el.dataset.day);
   else if (a === 'quick') {
     const m = S.meds.find((x) => x.id === el.dataset.id); const day = todayStr(); const now = new Date();
@@ -755,7 +1011,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && !S.sheet) rend
 async function boot(session) {
   S.user = session?.user || null;
   if (!S.user) { $('#app').innerHTML = loginView(); return; }
-  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); if (new URL(location.href).searchParams.get('q')) { await takePending(); openQuickFromUrl(); } else checkPendingQuick(); }
+  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); if (new URL(location.href).searchParams.get('q') || new URL(location.href).searchParams.get('c')) { await takePending(); openQuickFromUrl(); } else checkPendingQuick(); }
   catch (err) { $('#app').innerHTML = `<div class="login"><h1>Ой</h1><p>Не вдалося завантажити дані. Перевір інтернет і онови сторінку.</p><p class="err">${esc(err.message || err)}</p></div>`; }
 }
 
@@ -766,7 +1022,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 13;
+const APP_VERSION = 14;
 // заборона зуму щипком і подвійним тапом (iOS ігнорує user-scalable=no у деяких режимах)
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 && e.cancelable) e.preventDefault(); }, { passive: false });

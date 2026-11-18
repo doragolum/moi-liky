@@ -118,7 +118,7 @@ async function reminderPayload(m: Med, day: string, followup: boolean) {
 
 // ---------- cron tick ----------
 async function tick() {
-  const { data: users } = await sb.from("settings").select("user_id, tz, telegram_chat_id, notify_telegram, notify_push");
+  const { data: users } = await sb.from("settings").select("user_id, tz, telegram_chat_id, notify_telegram, notify_push, checkin_reminders, checkin_times");
   let sent = 0;
   for (const u of users ?? []) {
     const tgOn = !!u.telegram_chat_id && u.notify_telegram;
@@ -129,6 +129,24 @@ async function tick() {
     }
     if (!tgOn && !subs.length) continue;
     const L = local(u.tz);
+
+    // нагадування про самопочуття (ранок / день / вечір)
+    if (u.checkin_reminders) {
+      const SL = [["morning", "ранок"], ["day", "день"], ["evening", "вечір"]];
+      const times: string[] = u.checkin_times?.length === 3 ? u.checkin_times : ["10:30", "16:00", "22:30"];
+      for (let i = 0; i < 3; i++) {
+        const [slot, name] = SL[i]; const t = toMin(times[i]);
+        if (L.min < t || L.min > t + 120) continue;
+        const { data: has } = await sb.from("checkins").select("id").eq("user_id", u.user_id).eq("day", L.day).eq("slot", slot).maybeSingle();
+        if (has) continue;
+        const { data: ins } = await sb.from("checkin_reminders").upsert({ user_id: u.user_id, day: L.day, slot }, { onConflict: "user_id,day,slot", ignoreDuplicates: true }).select();
+        if (!ins?.length) continue;
+        const url = `${APP_URL}?c=${slot}`;
+        if (subs.length) sent += await pushTo(subs, { title: "Як самопочуття?", body: `Відміть ${name} — це 30 секунд`, tag: `checkin|${L.day}|${slot}`, url });
+        if (tgOn) { await tg("sendMessage", { chat_id: u.telegram_chat_id, text: `Як самопочуття — ${name}? Відміть за 30 секунд.`, reply_markup: { inline_keyboard: [[{ text: "Відмітити самопочуття", url }]] } }); sent++; }
+      }
+    }
+
     const { data: meds } = await sb.from("meds").select("*").eq("user_id", u.user_id).eq("active", true);
     const ids = (meds ?? []).map((m) => m.id);
     if (!ids.length) continue;

@@ -132,8 +132,8 @@ button{cursor:pointer}
 .code{font-family:ui-monospace,monospace;background:var(--accent-soft);padding:2px 6px;border-radius:6px}
 
 /* nav */
-.nav{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(14px + var(--safe-b));width:calc(100% - 32px);max-width:448px;padding:8px;border-radius:24px;background:#fff;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;box-shadow:0 4px 18px rgba(31,29,43,.1);z-index:5}
-.nav button{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border:0;border-radius:16px;background:transparent;color:var(--muted);font-size:12px;font-weight:700}
+.nav{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(14px + var(--safe-b));width:calc(100% - 32px);max-width:448px;padding:8px;border-radius:24px;background:#fff;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;box-shadow:0 4px 18px rgba(31,29,43,.1);z-index:5}
+.nav button{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border:0;border-radius:16px;background:transparent;color:var(--muted);font-size:11px;font-weight:700}
 .nav button.on{background:var(--accent-soft);color:var(--accent-ink)}
 
 /* sheet */
@@ -187,3 +187,30 @@ textarea{resize:none}
 /* без зуму: подвійний тап не збільшує, поля вводу ≥16px (iOS не зумить при фокусі) */
 button,a,input,select,textarea,label{touch-action:manipulation}
 input,select,textarea{font-size:16px !important}
+
+/* ---- Мунджаро ---- */
+.wks{display:flex;gap:6px}
+.wk{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:11px;font-weight:700;color:var(--muted)}
+.wk i{display:block;width:100%;height:8px;border-radius:4px;background:#d8d0fb}
+.wk.past i{background:#a99bff}.wk.cur i{background:var(--accent)}.wk.cur{color:var(--accent-ink)}
+.injbig{width:100%;border:0;padding:16px;border-radius:22px;background:var(--plum);color:#fff;display:flex;flex-direction:column;gap:10px;text-align:left}
+.bdg{font-size:12px;font-weight:700;padding:6px 10px;border-radius:999px;background:var(--plum2);white-space:nowrap}
+.sites{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.sites i{font-style:normal;text-align:center;padding:7px 0;border-radius:10px;font-size:12px;font-weight:700;background:var(--plum2);color:var(--plum-muted)}
+.sites i.on{background:var(--lime);color:var(--ink)}
+.tiles{margin:12px 22px 0;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tile{border:0;padding:14px;border-radius:20px;background:#fff;box-shadow:0 1px 2px rgba(31,29,43,.06);display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;color:var(--ink)}
+.tile span{font-size:12px;color:var(--muted);font-weight:700}.tile b{font-size:20px;font-weight:800}.tile small{font-size:11px;color:var(--muted)}
+.btls{display:flex;justify-content:center;gap:14px;flex-wrap:wrap}
+.btl{display:flex;flex-direction:column;align-items:center;gap:4px}.btl small{font-size:12px;font-weight:700;color:var(--muted2)}
+.slots{margin:6px 22px 0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.slot{border:2px solid var(--line);background:#fff;border-radius:14px;padding:8px 4px;display:flex;flex-direction:column;align-items:center;gap:1px;color:var(--ink)}
+.slot b{font-size:14px}.slot small{font-size:11px;color:var(--muted);font-weight:700}
+.slot.done{background:#e3f4ea;border-color:#e3f4ea}.slot.done small{color:var(--ok-ink)}
+.slot.on{background:var(--accent);border-color:var(--accent);color:#fff}.slot.on small{color:#e9e4ff}
+.chips{display:flex;flex-wrap:wrap;gap:6px}.chips .opt{min-height:40px;padding:0 12px}
+.arow{width:100%;border:0;background:transparent;display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid #f0edf7;text-align:left;color:var(--ink);font-size:14px}
+.arow:first-child{border-top:0}.arow b{width:26px;font-size:13px;color:var(--muted)}.arow.today b{color:var(--accent-ink)}.arow:disabled{opacity:.6}
+.cb{width:28px;height:28px;border-radius:9px;border:2px solid #d9d4e3;display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0}
+.cb.on{background:var(--ok);border-color:var(--ok)}
+.panel.warn{background:#fde8e3;color:#7a2512}.panel.warn p{color:#7a2512}
