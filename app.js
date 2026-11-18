@@ -104,12 +104,35 @@ async function ensureSeed() {
   }
 }
 
+// ---- офлайн-черга: відмітки зберігаються на телефоні й надсилаються, коли зʼявиться інтернет ----
+const QKEY = 'moi-liky-queue';
+const isNetErr = (e) => !navigator.onLine || /fetch|network|load failed/i.test(e?.message || '');
+const qGet = () => { try { return JSON.parse(localStorage.getItem(QKEY) || '[]'); } catch (_) { return []; } };
+const qSet = (q) => { try { localStorage.setItem(QKEY, JSON.stringify(q)); } catch (_) {} };
+function enqueue(op) { const q = qGet().filter((x) => !(op.key && x.key === op.key)); q.push(op); qSet(q); }
+let flushing = false;
+async function flushQueue() {
+  if (flushing || !S.user || !navigator.onLine) return; const q = qGet(); if (!q.length) return;
+  flushing = true; const rest = [];
+  for (const op of q) {
+    let error;
+    if (op.t === 'intake') ({ error } = await sb.from('intakes').upsert(op.row, { onConflict: 'med_id,day' }));
+    else if (op.t === 'intake-del') ({ error } = await sb.from('intakes').delete().eq('med_id', op.med_id).eq('day', op.day));
+    else if (op.t === 'water') ({ error } = await sb.from('water_logs').insert(op.row));
+    if (error && isNetErr(error)) rest.push(op);
+  }
+  qSet(rest); flushing = false;
+  if (rest.length < q.length) { toast('Офлайн-відмітки надіслано'); lastLoad = 0; refresh(); }
+}
+window.addEventListener('online', flushQueue);
+
 async function saveIntake(med, day, patch) {
   const row = { med_id: med.id, day, source: 'app', ...patch };
   const prev = S.intakes.get(k(med.id, day));
   S.intakes.set(k(med.id, day), { ...(prev || {}), ...row });
   render();
   const { data, error } = await sb.from('intakes').upsert(row, { onConflict: 'med_id,day' }).select().single();
+  if (error && isNetErr(error)) { enqueue({ t: 'intake', key: k(med.id, day), row }); toast('Немає інтернету — збережу, щойно зʼявиться'); return; }
   if (error) { toast('Не вдалося зберегти: ' + error.message); if (prev) S.intakes.set(k(med.id, day), prev); else S.intakes.delete(k(med.id, day)); render(); return; }
   S.intakes.set(k(med.id, day), data);
   render();
@@ -120,6 +143,7 @@ async function deleteIntake(med, day) {
   S.intakes.delete(k(med.id, day));
   render();
   const { error } = await sb.from('intakes').delete().eq('med_id', med.id).eq('day', day);
+  if (error && isNetErr(error)) { enqueue({ t: 'intake-del', key: k(med.id, day), med_id: med.id, day }); return prev; }
   if (error) { toast('Не вдалося скасувати'); if (prev) S.intakes.set(k(med.id, day), prev); render(); }
   return prev;
 }
@@ -143,6 +167,21 @@ function overdue(m) {
 // скільки днів до наступного планового прийому після сьогодні
 function daysToNext(m) { const t = new Date(parseYmd(todayStr())); t.setDate(t.getDate() + 1); const n = nextDue(m, ymd(t)); return n ? n.until + 1 : null; }
 
+// залишок: stock_count на момент stock_set_at мінус прийняте після цього
+function dailyUse(m) {
+  const per = Number(m.stock_per_dose || 1);
+  if (m.kind === 'weekly') return per * (wdays(m).length || 1) / 7;
+  if (m.kind === 'interval') return per / (m.interval_days || 1);
+  return per;
+}
+function stockOf(m) {
+  if (m.stock_count == null) return null;
+  const since = m.stock_set_at ? new Date(m.stock_set_at).getTime() : 0; let used = 0;
+  for (const r of S.intakes.values()) if (r.med_id === m.id && r.status === 'taken' && r.taken_at && new Date(r.taken_at).getTime() >= since) used += m.dose_options?.length && r.dose ? Number(r.dose) : Number(m.stock_per_dose || 1);
+  const left = Math.max(0, Number(m.stock_count) - used); const du = dailyUse(m);
+  return { left, days: du > 0 ? left / du : null, low: du > 0 && left / du <= (m.stock_alert_days ?? 7) };
+}
+const n1s = (v) => String(Math.round(v * 10) / 10).replace('.', ',');
 function lastSite(med) {
   let best = null;
   for (const r of S.intakes.values()) if (r.med_id === med.id && r.site && r.status === 'taken' && (!best || r.day > best.day)) best = r;
@@ -249,7 +288,11 @@ function medCardHtml(m, day = todayStr()) {
   let hint = '', hintOk = false;
   if (taken) {
     sub = (m.dose_options?.length && r.dose ? `${r.dose} таблетки` : m.dose_label) + (r.note ? ' · ' + r.note : '');
-    if (/до їжі/.test(m.note || '')) { hint = 'Їсти можна з ' + addMin(timeOf(r), 120); hintOk = true; }
+    if (/до їжі/.test(m.note || '')) {
+      const left = Math.round((new Date(r.taken_at).getTime() + 7200000 - Date.now()) / 60000);
+      if (day === today && left > 0) hint = `Їсти через ${left >= 60 ? Math.floor(left / 60) + ' год ' : ''}${left % 60} хв (о ${addMin(timeOf(r), 120)})`;
+      else { hint = day === today ? 'Можна їсти' : 'Їсти можна з ' + addMin(timeOf(r), 120); hintOk = true; }
+    }
   } else if (skipped) {
     sub = 'Пропущено' + (r.note ? ' · ' + r.note : '');
   } else if (!future && /після їжі/.test(m.note || '')) {
@@ -262,7 +305,8 @@ function medCardHtml(m, day = todayStr()) {
     : future ? `<span class="chip plan">${planHM(m)}</span>`
     : past ? `<button class="btn-quick" data-a="open" data-id="${m.id}" data-day="${day}" aria-label="Відмітити ${esc(m.name)}">Відмітити</button>`
     : `<button class="btn-quick" data-a="quick" data-id="${m.id}" aria-label="Відмітити ${esc(m.name)} зараз">Прийняла</button>`;
-  return `<div class="card ${taken ? 'taken' : skipped ? 'skipped' : ''}">
+  const swipe = day === today && !r ? `data-swipe="${m.id}"` : '';
+  return `<div class="card ${taken ? 'taken' : skipped ? 'skipped' : ''} ${S.pop === m.id ? 'pop' : ''}" ${swipe}>
     <button class="main" ${future ? 'disabled' : `data-a="open" data-id="${m.id}" data-day="${day}"`} aria-label="Деталі: ${esc(m.name)}">
       <span class="ico" style="background:${tint(m.color)}">${ICON_PILL(m.color)}</span>
       <span class="txt"><span class="nm">${esc(m.name)}</span><span class="sb">${esc(sub)}</span>${hint ? `<span class="hint ${hintOk ? 'ok' : ''}">${esc(hint)}</span>` : ''}</span>
@@ -292,7 +336,7 @@ function todayView() {
   const pills = ms.filter((m) => !m.track_sites); const inj = ms.filter((m) => m.track_sites);
   const isToday = day === today, future = day > today;
   const title = isToday ? 'Сьогодні' : fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' });
-  const tip = isToday ? 'Картка — деталі, кнопка — швидко' : future ? 'План на цей день' : 'Можна відмітити заднім числом';
+  const tip = isToday ? '' : future ? 'План на цей день' : 'Можна відмітити заднім числом';
   const empty = !ms.length ? `<div class="panel"><p>${isToday ? 'Сьогодні' : 'Цього дня'} нічого не заплановано.</p></div>` : '';
   const back = isToday ? '' : '<button class="btn link" data-a="wpick" data-day="">← Повернутись до сьогодні</button>';
   const late = isToday ? activeMeds().map((m) => ({ m, o: overdue(m) })).filter((x) => x.o).map(({ m, o }) => {
@@ -301,9 +345,31 @@ function todayView() {
       <span>Можна зробити ${o.left === 0 ? 'лише сьогодні' : 'до ' + esc(fmtDay(ymd(until), { weekday: 'long' }))} включно. Потім цю дозу краще пропустити.</span>
       <div class="two"><button class="btn" data-a="open" data-id="${m.id}" data-day="${o.day}" data-late="1">${m.track_sites ? 'Зробила зараз' : 'Прийняла зараз'}</button><button class="btn ghost" data-a="lateskip" data-id="${m.id}" data-day="${o.day}">Пропустити дозу</button></div></div>`;
   }).join('') : '';
-  return headerHtml() + weekHtml() + late +
-    `<div class="sec"><h2>${esc(title)}</h2><span class="tip">${tip}</span></div>
-     <div class="list">${pills.map((m) => medCardHtml(m, day)).join('')}</div>` + inj.map((m) => injHtml(m, day)).join('') + empty + back;
+  // «Далі»: найближчий невідмічений прийом сьогодні
+  let next = '';
+  if (isToday) {
+    const pend = ms.filter((m) => !S.intakes.get(k(m.id, today)) && dueOn(m, today)).sort((a, b) => planHM(a) < planHM(b) ? -1 : 1)[0];
+    if (pend) {
+      const [h, mi] = planHM(pend).split(':').map(Number); const t = new Date(); t.setHours(h, mi, 0, 0);
+      const diff = Math.round((t - Date.now()) / 60000); const a = Math.abs(diff);
+      const rel = a < 2 ? 'зараз' : (diff > 0 ? 'через ' : 'запізнення ') + (a >= 60 ? Math.floor(a / 60) + ' год ' : '') + (a % 60 ? (a % 60) + ' хв' : '');
+      next = `<div class="next ${diff < -15 ? 'lateish' : ''}"><span><small>Далі</small><b>${esc(pend.name)} · ${planHM(pend)}</b><small>${esc(rel.trim())}</small></span>
+        <button class="btn" ${pend.track_sites ? `data-a="open" data-id="${pend.id}" data-day="${today}"` : `data-a="quick" data-id="${pend.id}"`}>${pend.track_sites ? 'Відмітити' : 'Прийняла'}</button></div>`;
+    }
+  }
+  // залишок закінчується
+  const low = isToday ? activeMeds().map((m) => ({ m, st: stockOf(m) })).filter((x) => x.st?.low).map(({ m, st }) =>
+    `<button class="lowstock" data-a="edopen" data-id="${m.id}">Закінчується <b>${esc(m.name)}</b>: ${n1s(st.left)} ${esc(m.stock_unit || '')} · ~${Math.floor(st.days)} дн.</button>`).join('') : '';
+  // вода
+  let water = '';
+  if (isToday && S.mj) {
+    const st = S.settings || {}; const goal = st.water_goal_ml || 3000; const wt = waterOn(today); const pct = Math.min(100, Math.round(wt / goal * 100));
+    water = `<div class="waterbar"><button class="wb-l" data-a="gowater"><small>Вода</small><b>${litres(wt)} / ${litres(goal)} л</b><span class="bar"><i style="width:${pct}%"></i></span></button>
+      <button class="opt" data-a="mjw" data-v="${st.bottle_ml || 1180}">+ пляшка</button><button class="opt" data-a="mjw" data-v="${st.glass_ml || 250}">+ склянка</button></div>`;
+  }
+  return headerHtml() + weekHtml() + next + late + low +
+    `<div class="sec"><h2>${esc(title)}</h2>${tip ? `<span class="tip">${tip}</span>` : ''}</div>
+     <div class="list">${pills.map((m) => medCardHtml(m, day)).join('')}</div>` + inj.map((m) => injHtml(m, day)).join('') + water + empty + back;
 }
 
 function historyView() {
@@ -333,7 +399,7 @@ function historyView() {
   // streak
   let streak = 0; { const x = new Date(); { const st0 = dayStatus(today); if (st0.t !== st0.n) x.setDate(x.getDate() - 1); }
     while (ymd(x) >= first) { const st = dayStatus(ymd(x)); if (st.t === st.n && st.n) { streak++; x.setDate(x.getDate() - 1); } else break; } }
-  const stat = all ? `${Math.round(ok / all * 100)}% · серія ${streak} дн.` : (streak ? `Серія ${streak} дн.` : 'Початок 🌱'.replace('🌱', '').trim());
+  const statCards = `<div class="stats"><div><b>${all ? Math.round(ok / all * 100) + '%' : '—'}</b><small>прийомів</small></div><div><b>${streak}</b><small>днів поспіль</small></div><div><b>${all - ok}</b><small>пропусків</small></div></div>`;
 
   const rows = dayMeds(sel).map((m) => {
     const r = S.intakes.get(k(m.id, sel));
@@ -349,43 +415,124 @@ function historyView() {
     `<div class="sec"><div class="mnav"><button data-a="mprev" aria-label="Попередній місяць"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
        <h2>${esc(new Date(y, mo, 1).toLocaleDateString('uk-UA', { month: 'long', year: 'numeric' }))}</h2>
        ${isCur ? '' : '<button data-a="mnext" aria-label="Наступний місяць"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>'}</div>
-       <span class="stat">${esc(stat)}</span></div>
+       </div>
+     ${statCards}
      <div class="cal"><div class="hd">${WD.map((w) => `<span>${w}</span>`).join('')}</div><div class="gr">${cells.join('')}</div>
-       <div class="legend">${legendMeds.map((m) => `<span><i style="background:${m.color}"></i>${esc(m.name)}</span>`).join('')}
-       <span><i style="background:#b9b3c9"></i>пропуск</span><span><i style="background:#f0a58f"></i>не відмічено</span>${hasInj ? '<span><i class="sq"></i>укол</span>' : ''}</div></div>
+       <div class="legend">${legendMeds.map((m) => `<span><i style="background:${m.color}"></i>${esc(m.name)}</span>`).join('')}${hasInj ? '<span><i class="sq"></i>укол</span>' : ''}</div>
+       <div class="legend" style="padding-top:0">сіра крапка — пропуск · рожева — не відмічено</div></div>
      <div class="detail"><span class="t">${sel === today ? 'Сьогодні, ' : ''}${esc(fmtDay(sel, { weekday: 'long', day: 'numeric', month: 'long' }))}</span>${rows}
        <span class="help">Натисни на рядок, щоб відмітити або змінити.</span></div>`;
 }
 
 function medsView() {
-  const st = S.settings;
-  const linked = !!st?.telegram_chat_id;
-  const botLink = CONFIG.botUsername && st?.link_code ? `https://t.me/${CONFIG.botUsername}?start=${st.link_code}` : '';
   const list = S.meds.map((m) => {
     const nx = m.active && m.kind !== 'daily' ? nextDue(m) : null;
     const nxt = nx ? (nx.until === 0 ? ' · сьогодні' : nx.until === 1 ? ' · завтра' : ' · наступний ' + fmtDay(nx.day, { day: 'numeric', month: 'long' })) : '';
+    const st = stockOf(m);
     return `<button class="mrow mbtn ${m.active ? '' : 'paused'}" data-a="edopen" data-id="${m.id}"><i style="background:${m.color}"></i><span class="f"><b>${esc(m.name)}${m.active ? '' : ' · на паузі'}</b>
       <small>${esc(m.dose_label)} · ${esc(schedLabel(m))}, ${planHM(m)}${esc(nxt)}</small>
       ${m.start_date ? `<small>з ${esc(fmtDay(m.start_date, { day: 'numeric', month: 'long', year: 'numeric' }))} · ${esc(sinceLabel(m.start_date))}</small>` : ''}
-      <small>${m.note ? esc(m.note) + ' · ' : ''}нагадування за ${m.remind_before_min} хв${m.followup_after_min ? `, повтор через ${m.followup_after_min} хв` : ''}</small></span>
+      ${st ? `<small class="${st.low ? 'warnt' : ''}">Залишок: ${n1s(st.left)} ${esc(m.stock_unit || '')}${st.days != null ? ` · ~${Math.floor(st.days)} дн.` : ''}</small>` : ''}</span>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>`;
   }).join('');
-  return `<header class="head"><div><div class="date">Налаштування</div><h1>Мої ліки</h1></div></header>
-    <div class="panel"><h3>Розклад</h3><p style="font-size:13px">Натисни на ліки, щоб змінити дозування, час чи періодичність.</p>${list}
-      <button class="btn ghost" data-a="ednew">+ Додати ліки</button></div>
-    <div class="panel"><h3>Telegram</h3>
-      ${linked ? '<p>Підключено. Нагадування приходять у бот, а кнопки в повідомленнях одразу відмічають прийом тут.</p>'
-        : botLink ? `<p>Натисни кнопку, відкриється бот — натисни «Start». Після цього нагадування почнуть приходити.</p><a class="btn" href="${botLink}" target="_blank" rel="noopener">Підключити Telegram</a>`
-        : '<p>Бот ще налаштовується.</p>'}
-    </div>
-    <div class="panel"><h3>Куди надсилати нагадування</h3>
+  return `<header class="head"><div><div class="date">Розклад і залишок</div><h1>Мої ліки</h1></div>
+      <button class="shx gear" data-a="gear" aria-label="Налаштування"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button></header>
+    <div class="panel">${list}<button class="btn ghost" data-a="ednew">+ Додати ліки</button></div>
+    <div class="panel"><button class="btn ghost" data-a="report">Звіт для лікаря</button></div>`;
+}
+
+// ---------- звіт для лікаря ----------
+function reportView() {
+  const N = S.reportWeeks || 4; const today = todayStr();
+  const fromD = new Date(parseYmd(today)); fromD.setDate(fromD.getDate() - N * 7 + 1); const from = ymd(fromD);
+  const first = startDay(); const st = S.settings || {};
+  const days = []; for (let d = new Date(fromD); ymd(d) <= today; d.setDate(d.getDate() + 1)) days.push(ymd(d));
+  const fmt = (d) => fmtDay(d, { day: 'numeric', month: 'short' });
+  const SEV = ['без симптомів', 'легко', 'помірно', 'сильно'];
+  // ліки
+  const medRows = S.meds.filter((m) => !m.track_sites).map((m) => {
+    let due = 0, ok = 0, onTime = 0, skip = 0; const miss = [];
+    for (const d of days) {
+      if (d < first || !dueOn(m, d)) continue;
+      const r = S.intakes.get(k(m.id, d));
+      if (d === today && !r) continue; due++;
+      if (r?.status === 'taken') { ok++; const [h, mi] = planHM(m).split(':').map(Number); const t = new Date(r.taken_at); if (Math.abs(t.getHours() * 60 + t.getMinutes() - (h * 60 + mi)) <= 60 && ymd(t) === d) onTime++; }
+      else if (r?.status === 'skipped') { skip++; miss.push(d); }
+      else if (d < today) miss.push(d);
+    }
+    // стиснути послідовні дати в діапазони: «3–7 лист.»
+    const ranges = []; for (const d of miss) { const last = ranges[ranges.length - 1]; const prev = last && new Date(parseYmd(last[1])); if (prev) prev.setDate(prev.getDate() + 1); if (last && ymd(prev) === d) last[1] = d; else ranges.push([d, d]); }
+    const missTxt = ranges.map(([a, b]) => a === b ? fmt(a) : `${fmt(a)} – ${fmt(b)}`);
+    if (!due) return '';
+    return `<tr><td><b>${esc(m.name)}</b><br><small>${esc(m.dose_label)} · ${esc(schedLabel(m))}, ${planHM(m)}</small></td><td>${ok}/${due}<br><small>${Math.round(ok / due * 100)}%</small></td><td>${onTime}</td><td><small>${miss.length ? esc(missTxt.join(', ')) + (skip ? ` (з них пропуск: ${skip})` : '') : '—'}</small></td></tr>`;
+  }).join('');
+  // уколи
+  const im = injMed();
+  const injRows = im ? days.filter((d) => dueOn(im, d) || S.intakes.get(k(im.id, d))).map((d) => {
+    const r = S.intakes.get(k(im.id, d));
+    const actual = r?.taken_at ? fmtDay(ymd(new Date(r.taken_at)), { weekday: 'short', day: 'numeric', month: 'short' }) + ' ' + timeOf(r) : '';
+    return `<tr><td>${esc(fmtDay(d, { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td>${r?.status === 'taken' ? esc(actual) + (ymd(new Date(r.taken_at)) !== d ? '<br><small>із запізненням</small>' : '') : r ? 'пропуск' : d <= today ? '<b>не відмічено</b>' : '—'}</td><td>${r?.dose_mg ? String(r.dose_mg).replace('.', ',') + ' мг' : '—'}</td><td>${esc(r?.site || '—')}</td></tr>`;
+  }).join('') : '';
+  // вага і обʼєми
+  const bodyIn = S.mj.body.filter((b) => b.day >= from && b.day <= today);
+  const wIn = bodyIn.filter((b) => b.weight_kg != null);
+  const wStart = st.weight_start ? Number(st.weight_start) : null;
+  const wLast = wIn.length ? Number(wIn[wIn.length - 1].weight_kg) : null;
+  const wFirst = wIn.length ? Number(wIn[0].weight_kg) : null;
+  const measRows = MEASURES.map(([f, l]) => { const v = bodyIn.filter((b) => b[f] != null); if (!v.length) return ''; const a = Number(v[0][f]), z = Number(v[v.length - 1][f]); return `<tr><td>${l}</td><td>${n1s(a)}</td><td>${n1s(z)}</td><td>${v.length > 1 ? (z - a <= 0 ? '−' : '+') + n1s(Math.abs(z - a)) : '—'}</td></tr>`; }).join('');
+  // самопочуття
+  const cks = S.mj.checkins.filter((c) => c.day >= from && c.day <= today);
+  const symCount = {}; for (const c of cks) for (const x of c.symptoms || []) symCount[x] = (symCount[x] || 0) + 1;
+  const symDays = days.map((d) => {
+    const dc = cks.filter((c) => c.day === d); if (!dc.length) return '';
+    const sev = Math.max(...dc.map((c) => c.severity ?? 0)); const sy = [...new Set(dc.flatMap((c) => c.symptoms || []))];
+    if (!sy.length && sev === 0) return '';
+    return `<tr><td>${esc(fmt(d))}</td><td>${esc(sy.join(', ') || '—')}</td><td>${SEV[sev] || '—'}</td></tr>`;
+  }).join('');
+  const sleeps = cks.filter((c) => c.slot === 'morning').map(sleepMins).filter((x) => x != null);
+  const wdays2 = days.filter((d) => d >= first); const wTot = S.mj.water.filter((w) => w.day >= from && w.day <= today).reduce((a, w) => a + w.ml, 0);
+  const notes = [...[...S.intakes.values()].filter((r) => r.day >= from && r.note).map((r) => ({ d: r.day, t: (S.meds.find((m) => m.id === r.med_id)?.name || '') + ': ' + r.note })),
+    ...cks.filter((c) => c.note).map((c) => ({ d: c.day, t: 'Самопочуття: ' + c.note }))].sort((a, b) => a.d < b.d ? -1 : 1);
+  return mjHead('Звіт для лікаря', 'Мої ліки') + `
+    <div class="noprint" style="margin:6px 22px 0"><div class="seg">${[4, 8, 12].map((w) => `<button type="button" class="${N === w ? 'on' : ''}" data-a="rweeks" data-v="${w}">${w} тижні${w > 4 ? 'в' : ''}</button>`).join('')}</div>
+      <button class="btn" data-a="print" style="width:100%;margin-top:10px">Зберегти PDF / роздрукувати</button></div>
+    <div class="report">
+      <h2>Звіт за ${esc(fmtDay(from, { day: 'numeric', month: 'long' }))} — ${esc(fmtDay(today, { day: 'numeric', month: 'long', year: 'numeric' }))}</h2>
+      <h3>Регулярні ліки</h3>
+      <table><tr><th>Препарат</th><th>Прийнято</th><th>Вчасно (±1 год)</th><th>Пропущено / не відмічено</th></tr>${medRows || '<tr><td colspan="4">Немає даних</td></tr>'}</table>
+      ${im ? `<h3>${esc(im.name)} — уколи</h3><table><tr><th>За планом</th><th>Фактично</th><th>Доза</th><th>Місце</th></tr>${injRows || '<tr><td colspan="4">Ще не було уколів</td></tr>'}</table>` : ''}
+      <h3>Вага й обʼєми</h3>
+      <p>${wStart ? `Стартова вага: <b>${n1s(wStart)} кг</b>. ` : ''}${wLast != null ? `За період: ${n1s(wFirst)} → <b>${n1s(wLast)} кг</b> (${wLast - wFirst <= 0 ? '−' : '+'}${n1s(Math.abs(wLast - wFirst))} кг)${wStart ? `, від старту ${wLast - wStart <= 0 ? '−' : '+'}${n1s(Math.abs(wLast - wStart))} кг` : ''}.` : 'Зважувань за період немає.'}${st.weight_goal ? ` Ціль: ${n1s(Number(st.weight_goal))} кг.` : ''}</p>
+      ${measRows ? `<table><tr><th>Обʼєм, см</th><th>Перший</th><th>Останній</th><th>Зміна</th></tr>${measRows}</table>` : ''}
+      <h3>Самопочуття</h3>
+      <p>Записів: ${cks.length}. ${Object.keys(symCount).length ? 'Найчастіше: ' + esc(Object.entries(symCount).sort((a, b) => b[1] - a[1]).map(([x, n]) => `${x.toLowerCase()} (${n})`).join(', ')) + '.' : 'Скарг не відмічено.'}</p>
+      ${symDays ? `<table><tr><th>День</th><th>Симптоми</th><th>Найсильніше</th></tr>${symDays}</table>` : ''}
+      <p>Сон: ${sleeps.length ? 'в середньому ' + fmtMins(Math.round(sleeps.reduce((a, b) => a + b, 0) / sleeps.length)) + ` (${sleeps.length} ночей)` : 'немає записів'}. Вода: в середньому ${litres(wdays2.length ? wTot / wdays2.length : 0)} л/день.</p>
+      ${notes.length ? `<h3>Коментарі</h3><ul>${notes.map((n) => `<li><b>${esc(fmt(n.d))}</b> — ${esc(n.t)}</li>`).join('')}</ul>` : ''}
+    </div>`;
+}
+
+function settingsView() {
+  const st = S.settings || {};
+  const linked = !!st.telegram_chat_id;
+  const botLink = CONFIG.botUsername && st.link_code ? `https://t.me/${CONFIG.botUsername}?start=${st.link_code}` : '';
+  const sw = (on, act, label) => `<button class="sw" role="switch" aria-checked="${!!on}" aria-label="${label}" data-a="${act}"></button>`;
+  const route = st.notify_route || 'push_main';
+  return mjHead('Налаштування', 'Мої ліки') + `
+    <div class="panel"><h3>Сповіщення</h3>
       ${pushPanel()}
-      <div class="nrow"><span>Telegram<small>${linked ? 'З кнопками «Прийняла», «Через 15 хв»' : 'Ще не підключено — див. нижче'}</small></span>
-        ${linked ? `<button class="sw" role="switch" aria-checked="${!!st.notify_telegram}" aria-label="Нагадування в Telegram" data-a="tgtoggle"></button>` : ''}</div>
+      <div class="nrow"><span>Telegram<small>${linked ? 'Підключено · кнопки «Прийняла», «Через 15 хв»' : 'Не підключено'}</small></span>${linked ? sw(st.notify_telegram, 'tgtoggle', 'Telegram') : ''}</div>
+      ${!linked && botLink ? `<a class="btn" href="${botLink}" target="_blank" rel="noopener">Підключити Telegram</a>` : ''}
+      ${linked && P.sub ? `<div class="lbl">Що куди надсилати<div class="seg">${[['push_main', 'Телефон'], ['tg_main', 'Telegram'], ['both', 'Обидва']].map(([v, l]) => `<button type="button" class="${route === v ? 'on' : ''}" data-a="route" data-v="${v}">${l}</button>`).join('')}</div>
+        <small style="font-weight:500;color:var(--muted)">${route === 'push_main' ? 'Звичайні нагадування — на телефон; повтори, пропуски, «можна їсти» і підсумки — у Telegram.' : route === 'tg_main' ? 'Усе — в Telegram; на телефон лише якщо Telegram недоступний.' : 'Кожне нагадування — і на телефон, і в Telegram.'}</small></div>` : ''}
     </div>
-    <div class="panel"><h3>Тема</h3><div class="seg">${[['light', 'Світла'], ['dark', 'Темна'], ['auto', 'Авто']].map(([v, l]) => `<button type="button" class="${getTheme() === v ? 'on' : ''}" data-a="theme" data-v="${v}">${l}</button>`).join('')}</div>
-      <p style="font-size:12px">«Авто» — як у налаштуваннях iPhone: вдень світла, ввечері темна, якщо так налаштовано.</p></div>
-    <div class="panel"><h3>На головний екран</h3><p>iPhone: Safari → «Поділитися» → «На екран „Додому“». Android: Chrome → ⋮ → «Додати на головний екран».</p></div>
+    <div class="panel"><h3>Нагадування</h3>
+      <div class="nrow"><span>Самопочуття 3 рази на день<small>${slotTimes().join(', ')}</small></span>${sw(st.checkin_reminders, 'cktoggle', 'Самопочуття')}</div>
+      <div class="nrow"><span>«Можна їсти»<small>через 2 год після ліків «до їжі»</small></span>${sw(st.eat_reminder, 'eattoggle', 'Можна їсти')}</div>
+      <div class="nrow"><span>Тижневий підсумок<small>щонеділі о 20:00</small></span>${sw(st.summary_enabled, 'sumtoggle', 'Підсумок')}</div>
+    </div>
+    <div class="panel"><h3>Тема</h3><div class="seg">${[['light', 'Світла'], ['dark', 'Темна'], ['auto', 'Авто']].map(([v, l]) => `<button type="button" class="${getTheme() === v ? 'on' : ''}" data-a="theme" data-v="${v}">${l}</button>`).join('')}</div></div>
+    ${isStandalone() ? '' : '<div class="panel"><h3>На головний екран</h3><p>iPhone: Safari → «Поділитися» → «На екран „Додому“».</p></div>'}
     <div class="panel"><button class="btn ghost" data-a="logout">Вийти з акаунта</button><p style="font-size:12px;text-align:center">Версія ${APP_VERSION}</p></div>`;
 }
 
@@ -409,7 +556,8 @@ function pushPanel() {
 }
 
 function navHtml() {
-  const b = (v, label, svg) => `<button class="${S.view === v ? 'on' : ''}" data-a="nav" data-v="${v}">${svg}${label}</button>`;
+  const cur = S.view === 'settings' || S.view === 'report' ? 'meds' : S.view;
+  const b = (v, label, svg) => `<button class="${cur === v ? 'on' : ''}" data-a="nav" data-v="${v}">${svg}${label}</button>`;
   return `<nav class="nav">${b('today', 'Сьогодні', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>')}
     ${b('history', 'Історія', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>')}
     ${b('mj', 'Мунджаро', '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/></svg>')}
@@ -536,13 +684,16 @@ function renderSheet() {
   const dayLbl = day === today ? 'сьогодні' : fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' });
   let body;
   if (r && !sh.edit) {
-    const t = r.status === 'skipped' ? 'Відмічено як пропуск' : `Відмічено ${ymd(new Date(r.taken_at)) !== r.day ? fmtDay(ymd(new Date(r.taken_at)), { weekday: 'long' }) + ' о ' + timeOf(r) + ' (із запізненням)' : 'о ' + timeOf(r)}` + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : '');
+    const t = r.status === 'skipped' ? 'Відмічено як пропуск' : `Відмічено ${ymd(new Date(r.taken_at)) !== r.day ? fmtDay(ymd(new Date(r.taken_at)), { weekday: 'long' }) + ' о ' + timeOf(r) + ' (із запізненням)' : 'о ' + timeOf(r)}` + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : '') + (r.dose_mg ? ` · ${String(r.dose_mg).replace('.', ',')} мг` : '');
     body = `<div class="done-box ${r.status === 'skipped' ? 'skip' : ''}">${esc(t)}${r.note ? '<br>' + esc(r.note) : ''}${r.source === 'telegram' ? '<br><small>через Telegram</small>' : ''}</div>
       <button class="btn ghost" data-a="sedit">Змінити</button>
       <button class="btn link" data-a="sdel">Скасувати відмітку</button>`;
   } else {
     const doses = m.dose_options?.length ? `<div class="lbl">Скільки таблеток<div class="opts">${m.dose_options.map((n) => `<button class="opt ${sh.dose === n ? 'on' : ''}" data-a="sdose" data-v="${n}">${n} таблетки</button>`).join('')}</div></div>` : '';
     const sug = m.track_sites ? suggestSite(m) : null; const ls = m.track_sites ? lastSite(m) : null;
+    const MG = [2.5, 5, 7.5, 10, 12.5, 15];
+    if (m.track_sites && sh.mg == null) sh.mg = r?.dose_mg ?? Number(S.settings?.mj_dose_mg ?? 2.5);
+    const mg = m.track_sites ? `<div class="lbl">Доза<div class="opts" style="grid-template-columns:repeat(3,minmax(0,1fr))">${MG.map((v) => `<button class="opt ${Number(sh.mg) === v ? 'on' : ''}" data-a="smg" data-v="${v}">${String(v).replace('.', ',')} мг</button>`).join('')}</div></div>` : '';
     const sites = m.track_sites ? `<div class="lbl">Місце уколу<div class="opts">${SITES.map((s) => `<button class="opt ${sh.site === s ? 'on' : ''}" data-a="ssite" data-v="${esc(s)}">${esc(s)}${s === sug ? '<small>за чергуванням</small>' : ''}</button>`).join('')}</div>
       <span style="font-weight:500;font-size:12px;color:var(--muted)">${ls ? 'Минулого разу: ' + esc(ls.site) + ', ' + esc(fmtDay(ls.day, { day: 'numeric', month: 'long' })) : 'Перший укол — з нього почнеться історія місць'}</span></div>` : '';
     const timeSel = day === today || sh.late
@@ -551,7 +702,7 @@ function renderSheet() {
     const tShow = sh.mode === 'now' ? hm(new Date()) : sh.time;
     const gap = sh.late ? daysToNext(m) : null;
     const lateInfo = sh.late ? `<div class="done-box skip">Доза за ${esc(fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' }))}, робиш сьогодні.${gap != null && gap < 3 ? ` Наступна за планом через ${gap} дн. — між уколами має бути щонайменше 3 дні, уточни з лікарем, чи зсунути наступну.` : ''}</div>` : '';
-    body = `${lateInfo}${doses}${sites}${timeSel}${timeIn}
+    body = `${lateInfo}${doses}${mg}${sites}${timeSel}${timeIn}
       <label class="lbl">Коментар (не обовʼязково)<textarea rows="2" data-in="note" placeholder="Наприклад: поїла раніше, нудило…">${esc(sh.note)}</textarea></label>
       <button class="btn" data-a="ssave">${m.track_sites ? 'Відмітити укол' : 'Прийняла'} · ${tShow}</button>
       <button class="btn link" data-a="sskip">${day === today ? 'Пропускаю сьогодні' : 'Відмітити як пропуск'}</button>`;
@@ -609,10 +760,14 @@ function mjOverview() {
     const first = firstInjection(m);
     const dose = String(st.mj_dose_mg ?? 2.5).replace('.', ',');
     if (first) {
-      const w = Math.floor((parseYmd(today) - parseYmd(first)) / 604800000) + 1;
+      const curMg = Number(st.mj_dose_mg ?? 2.5);
+      let firstAtDose = null; for (const r of S.intakes.values()) if (r.med_id === m.id && r.status === 'taken' && Number(r.dose_mg) === curMg && (!firstAtDose || r.day < firstAtDose)) firstAtDose = r.day;
+      const total = Math.floor((parseYmd(today) - parseYmd(first)) / 604800000) + 1;
+      const w = Math.floor((parseYmd(today) - parseYmd(firstAtDose || first)) / 604800000) + 1;
       const within = (w - 1) % 4;
       const bars = [0, 1, 2, 3].map((i) => `<span class="wk ${i < within ? 'past' : i === within ? 'cur' : ''}"><i></i>Т${Math.floor((w - 1) / 4) * 4 + i + 1}</span>`).join('');
-      prog = `<div class="panel"><div class="row" style="color:var(--ink)"><span style="font-weight:800">Тиждень ${w} · ${dose} мг</span><span style="font-size:12px;color:var(--muted)">з ${esc(fmtDay(first, { day: 'numeric', month: 'long' }))}</span></div>
+      void bars;
+      prog = `<div class="panel"><div class="row" style="color:var(--ink)"><span style="font-weight:800">Тиждень ${w} на ${dose} мг</span><span style="font-size:12px;color:var(--muted)">загалом тиждень ${total}</span></div>
         <div class="wks">${bars}</div><p style="font-size:12px">${within === 3 ? 'Кінець 4-тижневого етапу — обговори з лікарем, чи підвищувати дозу.' : 'Підвищення дози — лише після рішення лікаря.'}</p></div>`;
     } else {
       const nx = nextDue(m);
@@ -633,16 +788,23 @@ function mjOverview() {
   const wd = weekDays(); const act = wd.filter((d) => activityOn(d)).length;
   const done = SLOTS.filter((s) => checkinOf(today, s.id)).length;
   const cs = currentSlot(); const csName = SLOTS.find((s) => s.id === cs).name.toLowerCase();
-  const tile = (sub, t, v, s2) => `<button class="tile" data-a="mjsub" data-v="${sub}"><span>${t}</span><b>${v}</b><small>${s2}</small></button>`;
+  const tile = (sub, t, v, s2, viz = '') => `<button class="tile" data-a="mjsub" data-v="${sub}"><span>${t}</span><b>${v}</b><small>${s2}</small>${viz}</button>`;
+  const wpct = Math.min(1, wt / goal);
+  const ringViz = `<svg class="tviz" width="40" height="40" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="15" fill="none" style="stroke:var(--track)" stroke-width="5"/><circle cx="20" cy="20" r="15" fill="none" stroke="#3fa3e0" stroke-width="5" stroke-linecap="round" stroke-dasharray="94.2" stroke-dashoffset="${(94.2 * (1 - wpct)).toFixed(1)}" transform="rotate(-90 20 20)"/></svg>`;
+  const wts = [st.weight_start ? Number(st.weight_start) : null, ...S.mj.body.filter((b) => b.weight_kg != null).map((b) => Number(b.weight_kg))].filter((v) => v != null).slice(-8);
+  let spark = '';
+  if (wts.length > 1) { const hi = Math.max(...wts), lo = Math.min(...wts), rg = hi - lo || 1; spark = `<svg class="tviz" width="56" height="28" viewBox="0 0 56 28" aria-hidden="true"><polyline fill="none" stroke="#6c5ce7" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${wts.map((v, i) => `${(i * 52 / (wts.length - 1) + 2).toFixed(1)},${(2 + (hi - v) / rg * 24).toFixed(1)}`).join(' ')}"/></svg>`; }
   return `<header class="head"><div><div class="date">${esc(new Date().toLocaleDateString('uk-UA', { weekday: 'long', day: 'numeric', month: 'long' }))}</div><h1>Мунджаро</h1></div></header>
     ${prog}${inj ? `<div style="margin:12px 22px 0">${inj}</div>` : ''}
     <div class="tiles">
-      ${tile('water', 'Вода', `${litres(wt)} / ${litres(goal)} л`, wt >= goal ? 'ціль виконано' : `ще ${litres(goal - wt)} л`)}
+      ${tile('water', 'Вода', `${litres(wt)} / ${litres(goal)} л`, wt >= goal ? 'ціль виконано' : `ще ${litres(goal - wt)} л`, ringViz)}
       ${tile('water', 'Сон', sl != null ? fmtMins(sl) : '—', sl != null ? ['погано', 'нормально', 'добре'][checkinOf(today, 'morning')?.sleep_quality ?? 1] : 'відміть зранку')}
-      ${tile('weight', 'Вага', lb ? `${String(lb.weight_kg).replace('.', ',')} кг` : (st.weight_start ? `${String(st.weight_start).replace('.', ',')} кг` : '—'), st.weight_goal ? `ціль ${String(st.weight_goal).replace('.', ',')}` : 'додай зважування')}
+      ${tile('weight', 'Вага', lb ? `${String(lb.weight_kg).replace('.', ',')} кг` : (st.weight_start ? `${String(st.weight_start).replace('.', ',')} кг` : '—'), st.weight_goal ? `ціль ${String(st.weight_goal).replace('.', ',')}` : 'додай зважування', spark)}
       ${tile('activity', 'Активність', `${act} / 7`, 'днів цього тижня')}
     </div>
-    <div style="margin:12px 22px 0"><button class="btn" data-a="mjcheck" data-v="${cs}" style="width:100%;gap:10px">Самопочуття · ${csName} <span class="bdg" style="background:rgba(255,255,255,.2)">${done} з 3</span></button></div>`;
+    <div class="two" style="margin:12px 22px 0"><button class="btn" data-a="mjcheck" data-v="${cs}" style="gap:8px">Самопочуття · ${csName} <span class="bdg" style="background:rgba(255,255,255,.2)">${done}/3</span></button>
+      ${checkinOf(today, cs) ? '<button class="btn ghost" disabled>Відмічено ✓</button>' : `<button class="btn okbtn" data-a="mjok" data-v="${cs}">Все добре</button>`}</div>
+    <div style="margin:10px 22px 0"><button class="btn ghost" data-a="report" style="width:100%">Звіт для лікаря</button></div>`;
 }
 
 function mjWater() {
@@ -752,6 +914,17 @@ function openCheckin(slot) {
     sleep_start: c?.sleep_start?.slice(0, 5) || '', sleep_end: c?.sleep_end?.slice(0, 5) || '', sleep_quality: c?.sleep_quality ?? null, note: c?.note || '' };
   S.view = 'mj'; S.mjSub = 'checkin'; render(); window.scrollTo(0, 0);
 }
+async function quickOk(slot) {
+  const today = todayStr(); const prev = checkinOf(today, slot) || {};
+  const c = S.ck && S.ck.slot === slot ? S.ck : null;
+  const row = { day: today, slot, symptoms: [], severity: 0, appetite: prev.appetite ?? 0, energy: prev.energy ?? 1,
+    sleep_start: slot === 'morning' ? (c?.sleep_start || prev.sleep_start || null) : null, sleep_end: slot === 'morning' ? (c?.sleep_end || prev.sleep_end || null) : null,
+    sleep_quality: slot === 'morning' ? (c?.sleep_quality ?? prev.sleep_quality ?? null) : null, protein: slot === 'evening' ? (c?.protein ?? prev.protein ?? null) : null, note: prev.note || null };
+  const { data, error } = await sb.from('checkins').upsert(row, { onConflict: 'user_id,day,slot' }).select().single();
+  if (error) return toast('Не вдалося зберегти');
+  S.mj.checkins = S.mj.checkins.filter((x) => !(x.day === today && x.slot === slot)).concat(data);
+  S.ck = null; if (S.mjSub === 'checkin') S.mjSub = null; render(); toast('Записала: усе добре');
+}
 function mjCheckin() {
   const today = todayStr(); const c = S.ck; const t = slotTimes();
   const segq = (field, labels) => `<div class="seg">${labels.map((l, i) => `<button type="button" class="${c[field] === i ? 'on' : ''}" data-a="mjcf" data-f="${field}" data-v="${i}">${l}</button>`).join('')}</div>`;
@@ -760,6 +933,7 @@ function mjCheckin() {
   const danger = c.severity === 3 || ((c.symptoms.has('Біль у животі') || c.symptoms.has('Блювання')) && c.severity >= 2);
   return mjHead('Самопочуття', fmtDay(today, { weekday: 'long', day: 'numeric', month: 'long' })) + `
     <div class="slots">${tabs}</div>
+    <div style="margin:10px 22px 0"><button class="btn okbtn" data-a="mjok" data-v="${c.slot}" style="width:100%">Все добре — без симптомів</button></div>
     ${c.slot === 'morning' ? `<div class="panel"><h3>Сон</h3><div class="opts"><label class="lbl">Заснула<input type="time" data-cin="sleep_start" value="${esc(c.sleep_start)}"></label><label class="lbl">Прокинулась<input type="time" data-cin="sleep_end" value="${esc(c.sleep_end)}"></label></div>${segq('sleep_quality', ['Погано', 'Нормально', 'Добре'])}</div>` : ''}
     <div class="panel"><h3>Що зараз відчуваєш?</h3><div class="chips">${SYMPTOMS.map((s) => `<button type="button" class="opt ${c.symptoms.has(s) ? 'on' : ''}" data-a="mjsym" data-v="${esc(s)}">${esc(s)}</button>`).join('')}<button type="button" class="opt ${none ? 'on' : ''}" data-a="mjsym" data-v="">Нічого</button></div></div>
     <div class="panel"><h3>Наскільки сильно?</h3>${segq('severity', ['Немає', 'Легко', 'Помірно', 'Сильно'])}</div>
@@ -784,12 +958,14 @@ function mjView() {
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-a]'); if (!el || !el.dataset.a.startsWith('mj')) return;
   const a = el.dataset.a; const today = todayStr();
-  if (a === 'mjback') { S.mjSub = null; S.sleepDraft = null; render(); window.scrollTo(0, 0); }
+  if (a === 'mjback') { if (S.view === 'settings' || S.view === 'report') S.view = 'meds'; S.mjSub = null; S.sleepDraft = null; render(); window.scrollTo(0, 0); }
   else if (a === 'mjsub') { S.mjSub = el.dataset.v; S.sleepDraft = null; render(); window.scrollTo(0, 0); }
   else if (a === 'mjcheck') openCheckin(el.dataset.v);
+  else if (a === 'mjok') quickOk(el.dataset.v);
   else if (a === 'mjw') {
     const ml = Number(el.dataset.v);
     const { data, error } = await sb.from('water_logs').insert({ day: today, ml }).select().single();
+    if (error && isNetErr(error)) { const row = { day: today, ml }; enqueue({ t: 'water', row }); S.mj.water.push({ ...row, id: 'off-' + Date.now(), created_at: new Date().toISOString() }); render(); return toast(`+${ml} мл · збережу, щойно зʼявиться інтернет`); }
     if (error) return toast('Не вдалося зберегти');
     S.mj.water.push(data); render(); toast(`+${ml} мл`, async () => { S.toast = null; renderToast(); await sb.from('water_logs').delete().eq('id', data.id); S.mj.water = S.mj.water.filter((w) => w.id !== data.id); render(); });
   }
@@ -860,8 +1036,10 @@ function openEditor(id) {
     id: m.id, name: m.name, inj: !!m.track_sites, dose_label: m.dose_label, doses: (m.dose_options || []).join(', '),
     kind: m.kind, weekdays: [...wdays(m)], interval_days: m.interval_days || 2, start_date: m.start_date || '',
     plan_time: planHM(m), window_label: m.window_label || '', note: m.note || '', color: m.color,
-    remind: m.remind_before_min, follow: m.followup_after_min, late: m.late_window_days || 0, active: m.active, confirmDel: false, err: ''
-  } : { late: 0, id: null, name: '', inj: false, dose_label: '', doses: '', kind: 'daily', weekdays: [], interval_days: 2, start_date: todayStr(),
+    remind: m.remind_before_min, follow: m.followup_after_min, late: m.late_window_days || 0, active: m.active, confirmDel: false, err: '',
+    stock: (() => { const st = stockOf(m); return st ? String(Math.round(st.left * 10) / 10) : ''; })(), stock0: (() => { const st = stockOf(m); return st ? String(Math.round(st.left * 10) / 10) : ''; })(),
+    per: String(m.stock_per_dose ?? 1), unit: m.stock_unit || 'таб.'
+  } : { late: 0, stock: '', stock0: '', per: '1', unit: 'таб.', id: null, name: '', inj: false, dose_label: '', doses: '', kind: 'daily', weekdays: [], interval_days: 2, start_date: todayStr(),
     plan_time: '09:00', window_label: '', note: '', color: COLORS[S.meds.length % COLORS.length], remind: 5, follow: 15, active: true, confirmDel: false, err: '' };
   renderEditor();
 }
@@ -887,6 +1065,11 @@ function renderEditor() {
     <label class="lbl">Проміжок (необовʼязково)<input type="text" data-ein="window_label" value="${esc(e.window_label)}" placeholder="Напр. 9:00–10:00"></label>
     <label class="lbl">Примітка<input type="text" data-ein="note" value="${esc(e.note)}" placeholder="Напр. після їжі / за 2 год до їжі"></label>
     <div class="lbl">Колір<div class="colors">${COLORS.map((c) => `<button type="button" class="clr ${e.color === c ? 'on' : ''}" style="background:${c}" data-a="edcolor" data-v="${c}" aria-label="Колір"></button>`).join('')}</div></div>
+    <div class="lbl">Залишок (необовʼязково)
+      <div class="opts" style="grid-template-columns:1fr 1fr 1fr"><input type="number" step="0.5" inputmode="decimal" data-ein="stock" value="${esc(e.stock)}" placeholder="скільки є">
+        <select data-ein="unit">${['таб.', 'капс.', 'доз', 'мл', 'шт.'].map((u) => `<option ${e.unit === u ? 'selected' : ''}>${u}</option>`).join('')}</select>
+        <input type="number" step="0.5" inputmode="decimal" data-ein="per" value="${esc(e.per)}" placeholder="за раз"></div>
+      <small style="font-weight:500;color:var(--muted)">Скільки зараз є · одиниця · скільки йде за один прийом${e.dosesHint ? '' : ''}. Додаток рахуватиме, на скільки днів вистачить, і нагадає купити за тиждень.</small></div>
     <label class="row">Нагадати за${sel('remind', [0, 5, 10, 15, 30, 60], (v) => v ? v + ' хв' : 'у час прийому')}</label>
     ${e.kind !== 'daily' ? `<label class="row">Пропущену дозу можна зробити${sel('late', [0, 1, 2, 3, 4, 5, 6], (v) => v ? 'до ' + v + ' дн. пізніше' : 'не можна')}</label>` : ''}
     <label class="row">Повтор, якщо не відмічено${sel('follow', [0, 10, 15, 30, 60], (v) => v ? 'через ' + v + ' хв' : 'не повторювати')}</label>
@@ -911,7 +1094,9 @@ async function saveEditor() {
     kind: e.kind, weekdays: e.kind === 'weekly' ? e.weekdays : null, weekday: e.kind === 'weekly' ? e.weekdays[0] : null,
     interval_days: e.kind === 'interval' ? iv : null, start_date: e.start_date || null,
     plan_time: e.plan_time, window_label: e.window_label.trim() || null, note: e.note.trim() || null, color: e.color,
-    remind_before_min: Number(e.remind), followup_after_min: Number(e.follow), late_window_days: e.kind === 'daily' ? 0 : Number(e.late || 0), active: e.active
+    remind_before_min: Number(e.remind), followup_after_min: Number(e.follow), late_window_days: e.kind === 'daily' ? 0 : Number(e.late || 0), active: e.active,
+    stock_unit: e.unit || 'таб.', stock_per_dose: Number(String(e.per).replace(',', '.')) > 0 ? Number(String(e.per).replace(',', '.')) : 1,
+    ...(String(e.stock) !== String(e.stock0) ? (String(e.stock).trim() === '' ? { stock_count: null, stock_set_at: null } : { stock_count: Number(String(e.stock).replace(',', '.')), stock_set_at: new Date().toISOString() }) : {})
   };
   let res;
   if (e.id) res = await sb.from('meds').update(row).eq('id', e.id).select().single();
@@ -961,17 +1146,37 @@ document.addEventListener('touchend', () => {
   } else { sh.style.transform = ''; if (ov) ov.style.background = ''; }
 });
 
+// ---------- свайп картки вправо = «Прийняла» ----------
+let cs = null;
+document.addEventListener('touchstart', (e) => {
+  const card = e.target.closest('.card[data-swipe]'); if (!card || S.sheet || S.ed || S.quick) return;
+  const t = e.touches[0]; cs = { card, id: card.dataset.swipe, x: t.clientX, y: t.clientY, dx: 0, on: false };
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (!cs) return; const t = e.touches[0]; const dx = t.clientX - cs.x, dy = t.clientY - cs.y;
+  if (!cs.on) { if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { cs = null; return; } if (dx > 12 && dx > Math.abs(dy) * 1.5) cs.on = true; else return; }
+  cs.dx = Math.max(0, Math.min(160, dx)); cs.card.style.transition = 'none'; cs.card.style.transform = `translateX(${cs.dx}px)`;
+  cs.card.classList.toggle('armed', cs.dx > 90);
+  if (e.cancelable) e.preventDefault(); e.stopPropagation();
+}, { passive: false, capture: true });
+document.addEventListener('touchend', () => {
+  if (!cs) return; const { card, id, dx, on } = cs; cs = null; if (!on) return;
+  card.style.transition = 'transform .2s ease'; card.style.transform = ''; card.classList.remove('armed');
+  if (dx > 90) { const b = document.createElement('button'); b.dataset.a = 'quick'; b.dataset.id = id; b.style.display = 'none'; document.body.appendChild(b); b.click(); b.remove(); }
+}, { capture: true });
+
 // ---------- свайп «назад» (як в iPhone: від лівого краю вправо) ----------
-function canGoBack() { return (S.view === 'mj' && S.mjSub) || (S.view === 'today' && S.daySel); }
+function canGoBack() { return (S.view === 'mj' && S.mjSub) || (S.view === 'today' && S.daySel) || S.view === 'settings' || S.view === 'report'; }
 function goBack() {
-  if (S.view === 'mj' && S.mjSub) { S.mjSub = null; S.ck = null; S.sleepDraft = null; }
+  if (S.view === 'settings' || S.view === 'report') S.view = 'meds';
+  else if (S.view === 'mj' && S.mjSub) { S.mjSub = null; S.ck = null; S.sleepDraft = null; }
   else if (S.view === 'today' && S.daySel) S.daySel = null;
   render(); window.scrollTo(0, 0);
 }
 let sw = null;
 document.addEventListener('touchstart', (e) => {
   if (S.sheet || S.ed || S.quick || !canGoBack()) return;
-  if (e.target.closest('input,textarea,select,.sh')) return;
+  if (e.target.closest('input,textarea,select,.sh,.card[data-swipe]')) return;
   const t = e.touches[0]; sw = { x: t.clientX, y: t.clientY, dx: 0, on: false, edge: t.clientX < 40 };
 }, { passive: true });
 document.addEventListener('touchmove', (e) => {
@@ -997,7 +1202,7 @@ document.addEventListener('touchend', () => {
 // ---------- render ----------
 function render() {
   if (!S.user) return;
-  const v = S.view === 'history' ? historyView() : S.view === 'meds' ? medsView() : S.view === 'mj' ? mjView() : todayView();
+  const v = S.view === 'history' ? historyView() : S.view === 'meds' ? medsView() : S.view === 'settings' ? settingsView() : S.view === 'report' ? reportView() : S.view === 'mj' ? mjView() : todayView();
   $('#app').innerHTML = `<main class="wrap">${v}</main>${navHtml()}`;
   if (S.sheet) renderSheet();
   if (S.quick) renderQuick();
@@ -1012,6 +1217,7 @@ document.addEventListener('click', async (e) => {
   else if (a === 'lateskip') { const m = S.meds.find((x) => x.id === el.dataset.id); await saveIntake(m, el.dataset.day, { status: 'skipped', taken_at: null, dose: null, site: null, note: 'дозу пропущено' }); toast(`${m.name} — пропуск записано`); }
   else if (a === 'quick') {
     const m = S.meds.find((x) => x.id === el.dataset.id); const day = todayStr(); const now = new Date();
+    S.pop = m.id; setTimeout(() => { if (S.pop === m.id) { S.pop = null; } }, 800);
     await saveIntake(m, day, { status: 'taken', taken_at: now.toISOString(), dose: m.dose_options?.[0] ?? null, note: null, site: null });
     toast(`${m.name} — о ${hm(now)}${m.dose_options?.length ? ` · ${m.dose_options[0]} таб.` : ''}`, async () => { S.toast = null; renderToast(); await deleteIntake(m, day); });
   }
@@ -1024,7 +1230,7 @@ document.addEventListener('click', async (e) => {
   else if (a === 'qsite') { S.quick.site = el.dataset.v; renderQuick(); }
   else if (a === 'qtake') {
     const { m, day } = S.quick; const now = new Date(); const dose = el.dataset.v ? Number(el.dataset.v) : null;
-    await saveIntake(m, day, { status: 'taken', taken_at: now.toISOString(), dose, site: m.track_sites ? S.quick.site : null, note: null });
+    await saveIntake(m, day, { status: 'taken', taken_at: now.toISOString(), dose, site: m.track_sites ? S.quick.site : null, dose_mg: m.track_sites ? Number(S.settings?.mj_dose_mg ?? 2.5) : null, note: null });
     let msg = `Відмічено о ${hm(now)}` + (dose ? ` · ${dose} таб.` : '') + (m.track_sites ? ` · ${S.quick.site}` : '');
     if (/до їжі/.test(m.note || '')) msg += `. Їсти можна з ${addMin(hm(now), 120)}`;
     quickDone(msg);
@@ -1036,6 +1242,15 @@ document.addEventListener('click', async (e) => {
     if (error) toast('Не вдалося: ' + error.message); else quickDone(`Нагадаю о ${hm(due)}`);
   }
   else if (a === 'theme') { try { localStorage.setItem(THEME_KEY, el.dataset.v); } catch (_) {} applyTheme(); render(); }
+  else if (a === 'gowater') { S.view = 'mj'; S.mjSub = 'water'; render(); window.scrollTo(0, 0); }
+  else if (a === 'gear') { S.view = 'settings'; render(); window.scrollTo(0, 0); }
+  else if (a === 'route') updateSettings({ notify_route: el.dataset.v });
+  else if (a === 'eattoggle') updateSettings({ eat_reminder: !S.settings.eat_reminder });
+  else if (a === 'sumtoggle') updateSettings({ summary_enabled: !S.settings.summary_enabled });
+  else if (a === 'cktoggle') updateSettings({ checkin_reminders: !S.settings.checkin_reminders });
+  else if (a === 'report') { S.view = 'report'; S.reportWeeks = S.reportWeeks || 4; render(); window.scrollTo(0, 0); }
+  else if (a === 'rweeks') { S.reportWeeks = Number(el.dataset.v); render(); }
+  else if (a === 'print') window.print();
   else if (a === 'wpick') { const d = el.dataset.day; S.daySel = d && d !== todayStr() ? d : null; render(); }
   else if (a === 'edopen') openEditor(el.dataset.id);
   else if (a === 'ednew') openEditor(null);
@@ -1057,12 +1272,14 @@ document.addEventListener('click', async (e) => {
   else if (a === 'sdel') { const { m, day } = sh; S.sheet = null; renderSheet(); await deleteIntake(m, day); toast(`${m.name}: відмітку скасовано`); }
   else if (a === 'sdose') { sh.dose = Number(el.dataset.v); renderSheet(); }
   else if (a === 'ssite') { sh.site = el.dataset.v; renderSheet(); }
+  else if (a === 'smg') { sh.mg = Number(el.dataset.v); renderSheet(); }
   else if (a === 'smode') { sh.mode = el.dataset.v; if (sh.mode === 'custom' && !sh.time) sh.time = hm(new Date()); renderSheet(); }
   else if (a === 'ssave') {
     const { m, day } = sh; const t = sh.mode === 'now' ? hm(new Date()) : (sh.time || planHM(m));
     const actual = sh.late ? todayStr() : day;
     S.sheet = null; renderSheet();
-    await saveIntake(m, day, { status: 'taken', taken_at: sh.late && sh.mode === 'now' ? new Date().toISOString() : takenAtFor(actual, t), dose: m.dose_options?.length ? sh.dose : null, site: m.track_sites ? sh.site : null, note: sh.note.trim() || null });
+    await saveIntake(m, day, { status: 'taken', taken_at: sh.late && sh.mode === 'now' ? new Date().toISOString() : takenAtFor(actual, t), dose: m.dose_options?.length ? sh.dose : null, site: m.track_sites ? sh.site : null, dose_mg: m.track_sites ? sh.mg : null, note: sh.note.trim() || null });
+    if (m.track_sites && sh.mg && Number(sh.mg) !== Number(S.settings?.mj_dose_mg)) updateSettings({ mj_dose_mg: sh.mg });
     toast(`${m.name} — відмічено о ${t}`);
   }
   else if (a === 'sskip') {
@@ -1116,7 +1333,7 @@ async function checkPendingQuick() {
 if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', (e) => {
   if (e.data?.type === 'open-quick') checkPendingQuick();
 });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkPendingQuick(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { checkPendingQuick(); flushQueue(); } });
 
 // refresh when returning to the app (e.g. after answering in Telegram)
 let lastLoad = 0;
@@ -1132,7 +1349,7 @@ setInterval(() => { if (document.visibilityState === 'visible' && !S.sheet) rend
 async function boot(session) {
   S.user = session?.user || null;
   if (!S.user) { $('#app').innerHTML = loginView(); return; }
-  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); if (new URL(location.href).searchParams.get('q') || new URL(location.href).searchParams.get('c')) { await takePending(); openQuickFromUrl(); } else checkPendingQuick(); }
+  try { await ensureSeed(); await Promise.all([loadAll(), checkPush()]); lastLoad = Date.now(); render(); flushQueue(); if (new URL(location.href).searchParams.get('q') || new URL(location.href).searchParams.get('c')) { await takePending(); openQuickFromUrl(); } else checkPendingQuick(); }
   catch (err) { $('#app').innerHTML = `<div class="login"><h1>Ой</h1><p>Не вдалося завантажити дані. Перевір інтернет і онови сторінку.</p><p class="err">${esc(err.message || err)}</p></div>`; }
 }
 
@@ -1143,7 +1360,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 21;
+const APP_VERSION = 22;
 // ---- тема: light / dark / auto ----
 const THEME_KEY = 'moi-liky-theme';
 const getTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'light'; } catch (_) { return 'light'; } };

@@ -39,6 +39,24 @@ async function pushTo(subs: Sub[], payload: Record<string, unknown>) {
   }
   return ok;
 }
+// Маршрут: main — звичайні нагадування; extra — повтори, пропуски, «можна їсти», залишок; summary — підсумки
+type Ctx = { u: any; subs: Sub[]; tgOn: boolean };
+async function notify(c: Ctx, cls: "main" | "extra" | "summary", push: Record<string, unknown> | null, tgMsg: Record<string, unknown> | null) {
+  const route = c.u.notify_route || "push_main";
+  const canPush = c.subs.length > 0 && !!push, canTg = c.tgOn && !!tgMsg;
+  let usePush = false, useTg = false;
+  if (route === "both") { usePush = canPush; useTg = canTg; }
+  else if (route === "tg_main") { useTg = canTg; usePush = !useTg && canPush; }
+  else { // push_main
+    if (cls === "main") { usePush = canPush; useTg = !usePush && canTg; }
+    else { useTg = canTg; usePush = !useTg && canPush; }
+  }
+  let n = 0;
+  if (usePush) n += await pushTo(c.subs, push!);
+  if (useTg) { const r = await tg("sendMessage", { chat_id: c.u.telegram_chat_id, ...tgMsg! }); if (r.ok) n++; }
+  return n;
+}
+
 function pushPayload(m: Med, day: string, followup: boolean) {
   const plan = m.plan_time.slice(0, 5);
   return {
@@ -53,6 +71,7 @@ const SITES = ["Живіт ліворуч", "Живіт праворуч", "Ст
 const WINDOW_AFTER_MIN = 180; // не надсилати нагадування пізніше ніж через 3 год після плану
 
 type Med = {
+  stock_count?: number | null; stock_per_dose?: number; stock_unit?: string; stock_set_at?: string | null; stock_alert_days?: number; late_window_days?: number;
   id: string; user_id: string; name: string; dose_label: string; dose_options: number[] | null;
   kind: "daily" | "weekly" | "interval"; weekday: number | null; weekdays: number[] | null;
   interval_days: number | null; start_date: string | null; plan_time: string; note: string | null;
@@ -117,9 +136,61 @@ async function reminderPayload(m: Med, day: string, followup: boolean) {
   return { text, reply_markup: { inline_keyboard: rows } };
 }
 
+const fmtNum = (n: number) => String(Math.round(n * 10) / 10).replace(".", ",");
+function dailyUse(m: Med) {
+  const per = Number(m.stock_per_dose ?? 1);
+  if (m.kind === "daily") return per;
+  if (m.kind === "weekly") return per * ((m.weekdays?.length ? m.weekdays.length : 1) / 7);
+  if (m.kind === "interval") return per / (m.interval_days || 1);
+  return per;
+}
+async function stockInfo(m: Med) {
+  if (m.stock_count == null) return null;
+  let q = sb.from("intakes").select("dose, taken_at").eq("med_id", m.id).eq("status", "taken");
+  if (m.stock_set_at) q = q.gte("taken_at", m.stock_set_at);
+  const { data } = await q;
+  const used = (data ?? []).reduce((a, r) => a + (m.dose_options?.length && r.dose ? Number(r.dose) : Number(m.stock_per_dose ?? 1)), 0);
+  const left = Math.max(0, Number(m.stock_count) - used);
+  const du = dailyUse(m);
+  return { left, daysLeft: du > 0 ? left / du : null };
+}
+async function weeklySummary(u: any, meds: Med[], today: string) {
+  const end = Date.parse(today + "T00:00:00Z"); const days: string[] = [];
+  for (let i = 6; i >= 0; i--) days.push(new Date(end - i * 86400000).toISOString().slice(0, 10));
+  const { data: ints } = await sb.from("intakes").select("*").eq("user_id", u.user_id).gte("day", days[0]).lte("day", today);
+  let due = 0, ok = 0; const missed: string[] = [];
+  const first = String(u.created_at ?? "").slice(0, 10); const nowMin = local(u.tz).min;
+  for (const d of days) {
+    if (first && d < first) continue;
+    const dow = new Date(d + "T00:00:00Z").getUTCDay();
+    for (const m of meds) {
+      if (!dueOn(m, d, dow)) continue;
+      const r = (ints ?? []).find((x) => x.med_id === m.id && x.day === d);
+      if (d === today && !r && toMin(m.plan_time.slice(0, 5)) > nowMin) continue;
+      due++;
+      if (r?.status === "taken") ok++; else missed.push(`${m.name} (${new Intl.DateTimeFormat("uk-UA", { weekday: "short", timeZone: "UTC" }).format(new Date(d + "T00:00:00Z"))})`);
+    }
+  }
+  const { data: water } = await sb.from("water_logs").select("ml, day").eq("user_id", u.user_id).gte("day", days[0]).lte("day", today);
+  const wsum = (water ?? []).reduce((a, w) => a + w.ml, 0);
+  const { data: cks } = await sb.from("checkins").select("*").eq("user_id", u.user_id).gte("day", days[0]).lte("day", today);
+  const sleeps = (cks ?? []).filter((c) => c.slot === "morning" && c.sleep_start && c.sleep_end).map((c) => { const a = toMin(c.sleep_start.slice(0, 5)), b = toMin(c.sleep_end.slice(0, 5)); return (b - a + 1440) % 1440; });
+  const sym: Record<string, number> = {}; for (const c of cks ?? []) for (const s of c.symptoms ?? []) sym[s] = (sym[s] ?? 0) + 1;
+  const { data: body } = await sb.from("body_logs").select("day, weight_kg").eq("user_id", u.user_id).not("weight_kg", "is", null).order("day", { ascending: false }).limit(2);
+  const lines = [`<b>Підсумок тижня</b>`, `Прийоми: ${ok} з ${due}${due ? ` (${Math.round(ok / due * 100)}%)` : ""}`];
+  if (missed.length) lines.push(`Не відмічено: ${missed.slice(0, 8).join(", ")}${missed.length > 8 ? "…" : ""}`);
+  lines.push(`Вода: в середньому ${fmtNum(wsum / 7 / 1000)} л/день`);
+  if (sleeps.length) { const a = sleeps.reduce((x, y) => x + y, 0) / sleeps.length; lines.push(`Сон: в середньому ${Math.floor(a / 60)} год ${Math.round(a % 60)} хв`); }
+  if (body?.length) lines.push(`Вага: ${fmtNum(Number(body[0].weight_kg))} кг${body[1] ? ` (${Number(body[0].weight_kg) <= Number(body[1].weight_kg) ? "−" : "+"}${fmtNum(Math.abs(Number(body[0].weight_kg) - Number(body[1].weight_kg)))} кг)` : ""}`);
+  const symList = Object.entries(sym).sort((a, b) => b[1] - a[1]).map(([s, n]) => `${s.toLowerCase()} ×${n}`);
+  lines.push(symList.length ? `Самопочуття: ${symList.join(", ")}` : `Самопочуття: без скарг`);
+  for (const m of meds) { const st = await stockInfo(m); if (st && st.daysLeft != null && st.daysLeft <= (m.stock_alert_days ?? 7)) lines.push(`Закінчується: ${esc(m.name)} — ~${Math.floor(st.daysLeft)} дн.`); }
+  return lines.join("\n");
+}
+
 // ---------- cron tick ----------
 async function tick() {
-  const { data: users } = await sb.from("settings").select("user_id, tz, telegram_chat_id, notify_telegram, notify_push, checkin_reminders, checkin_times");
+  const { data: users } = await sb.from("settings").select("*");
   let sent = 0;
   for (const u of users ?? []) {
     const tgOn = !!u.telegram_chat_id && u.notify_telegram;
@@ -130,6 +201,7 @@ async function tick() {
     }
     if (!tgOn && !subs.length) continue;
     const L = local(u.tz);
+    const C: Ctx = { u, subs, tgOn };
 
     // нагадування про самопочуття (ранок / день / вечір)
     if (u.checkin_reminders) {
@@ -143,8 +215,8 @@ async function tick() {
         const { data: ins } = await sb.from("checkin_reminders").upsert({ user_id: u.user_id, day: L.day, slot }, { onConflict: "user_id,day,slot", ignoreDuplicates: true }).select();
         if (!ins?.length) continue;
         const url = `${APP_URL}?c=${slot}`;
-        if (subs.length) sent += await pushTo(subs, { title: "Як самопочуття?", body: `Відміть ${name} — це 30 секунд`, tag: `checkin|${L.day}|${slot}`, url });
-        if (tgOn) { await tg("sendMessage", { chat_id: u.telegram_chat_id, text: `Як самопочуття — ${name}? Відміть за 30 секунд.`, reply_markup: { inline_keyboard: [[{ text: "Відмітити самопочуття", url }]] } }); sent++; }
+        sent += await notify(C, "main", { title: "Як самопочуття?", body: `Відміть ${name} — це 30 секунд`, tag: `checkin|${L.day}|${slot}`, url },
+          { text: `Як самопочуття — ${name}? Відміть за 30 секунд.`, reply_markup: { inline_keyboard: [[{ text: "Відмітити самопочуття", url }]] } });
       }
     }
 
@@ -170,12 +242,8 @@ async function tick() {
         // якщо звичайне нагадування ще не йшло (напр. щойно підключилась) — не дублюємо
         await sb.from("reminders_log").upsert({ med_id: m.id, day: L.day, kind: "remind" }, { onConflict: "med_id,day,kind", ignoreDuplicates: true });
       }
-      if (subs.length) sent += await pushTo(subs, pushPayload(m, L.day, kind === "followup"));
-      if (tgOn) {
-        const p = await reminderPayload(m, L.day, kind === "followup");
-        const r = await tg("sendMessage", { chat_id: u.telegram_chat_id, parse_mode: "HTML", ...p });
-        if (r.ok) { sent++; await sb.from("reminders_log").update({ tg_message_id: r.result.message_id }).eq("med_id", m.id).eq("day", L.day).eq("kind", kind); }
-      }
+      const p = await reminderPayload(m, L.day, kind === "followup");
+      sent += await notify(C, kind === "followup" ? "extra" : "main", pushPayload(m, L.day, kind === "followup"), { parse_mode: "HTML", ...p });
     }
 
     // пропущені дози, які ще можна зробити (late_window_days) — одне нагадування на день у плановий час
@@ -195,12 +263,9 @@ async function tick() {
         const left = w - i;
         const dn = new Intl.DateTimeFormat("uk-UA", { weekday: "long", timeZone: "UTC" }).format(dt);
         const when = left === 0 ? "лише сьогодні" : `сьогодні або ще ${left} дн.`;
-        if (subs.length) sent += await pushTo(subs, { title: `Пропущено: ${m.name}`, body: `Доза за ${dn}. Можна зробити ${when}.`, tag: `${m.id}|${d}`, url: `${APP_URL}?q=${m.id}&d=${d}&f=1` });
-        if (tgOn) {
-          const p = await reminderPayload(m, d, true);
-          p.text = `<b>${esc(m.name)}</b>: доза за ${dn} не відмічена. Можна зробити ${when}, потім краще пропустити.`;
-          await tg("sendMessage", { chat_id: u.telegram_chat_id, parse_mode: "HTML", ...p }); sent++;
-        }
+        const p = await reminderPayload(m, d, true);
+        p.text = `<b>${esc(m.name)}</b>: доза за ${dn} не відмічена. Можна зробити ${when}, потім краще пропустити.`;
+        sent += await notify(C, "extra", { title: `Пропущено: ${m.name}`, body: `Доза за ${dn}. Можна зробити ${when}.`, tag: `${m.id}|${d}`, url: `${APP_URL}?q=${m.id}&d=${d}&f=1` }, { parse_mode: "HTML", ...p });
         break;
       }
     }
@@ -211,12 +276,46 @@ async function tick() {
       await sb.from("snoozes").update({ sent: true }).eq("id", s.id);
       const { data: has } = await sb.from("intakes").select("id").eq("med_id", s.med_id).eq("day", s.day).maybeSingle();
       if (has) continue;
-      const m = (meds as Med[]).find((x) => x.id === s.med_id)!;
-      if (subs.length) sent += await pushTo(subs, pushPayload(m, s.day, true));
-      if (tgOn) {
-        const p = await reminderPayload(m, s.day, true);
-        await tg("sendMessage", { chat_id: u.telegram_chat_id, parse_mode: "HTML", ...p });
-        sent++;
+      const m = (meds as Med[]).find((x) => x.id === s.med_id);
+      if (!m) continue;
+      const p = await reminderPayload(m, s.day, true);
+      sent += await notify(C, "extra", pushPayload(m, s.day, true), { parse_mode: "HTML", ...p });
+    }
+
+    // «можна їсти» через 2 год після ліків «до їжі»
+    if (u.eat_reminder) {
+      for (const m of (meds ?? []) as Med[]) {
+        if (!/до їжі/.test(m.note ?? "")) continue;
+        const { data: r } = await sb.from("intakes").select("taken_at").eq("med_id", m.id).eq("day", L.day).eq("status", "taken").maybeSingle();
+        if (!r?.taken_at) continue;
+        const mins = (Date.now() - Date.parse(r.taken_at)) / 60000;
+        if (mins < 120 || mins > 240) continue;
+        const { data: ins } = await sb.from("reminders_log").upsert({ med_id: m.id, day: L.day, kind: "eat" }, { onConflict: "med_id,day,kind", ignoreDuplicates: true }).select();
+        if (!ins?.length) continue;
+        sent += await notify(C, "extra", { title: "Можна їсти", body: `Минуло 2 години після ${m.name}.`, tag: `eat|${L.day}`, url: APP_URL }, { text: `Можна їсти — минуло 2 години після ${m.name}.` });
+      }
+    }
+
+    // залишок закінчується (раз на 3 дні, у проміжку 12:00–14:00)
+    if (L.min >= 720 && L.min <= 840) {
+      for (const m of (meds ?? []) as Med[]) {
+        const st = await stockInfo(m); if (!st || st.daysLeft == null || st.daysLeft > (m.stock_alert_days ?? 7)) continue;
+        const since = new Date(Date.parse(L.day + "T00:00:00Z") - 2 * 86400000).toISOString().slice(0, 10);
+        const { data: recent } = await sb.from("reminders_log").select("id").eq("med_id", m.id).eq("kind", "stock").gte("day", since).limit(1);
+        if (recent?.length) continue;
+        await sb.from("reminders_log").upsert({ med_id: m.id, day: L.day, kind: "stock" }, { onConflict: "med_id,day,kind", ignoreDuplicates: true });
+        const msg = `${m.name}: залишилось ${fmtNum(st.left)} ${m.stock_unit} — приблизно на ${Math.max(0, Math.floor(st.daysLeft))} дн. Час купити.`;
+        sent += await notify(C, "extra", { title: "Закінчуються ліки", body: msg, tag: `stock|${m.id}`, url: APP_URL }, { text: msg });
+      }
+    }
+
+    // тижневий підсумок: неділя, 20:00–22:00
+    if (u.summary_enabled && L.dow === 0 && L.min >= 1200 && L.min <= 1320) {
+      const { data: ins } = await sb.from("checkin_reminders").upsert({ user_id: u.user_id, day: L.day, slot: "summary" }, { onConflict: "user_id,day,slot", ignoreDuplicates: true }).select();
+      if (ins?.length) {
+        const text = await weeklySummary(u, (meds ?? []) as Med[], L.day);
+        sent += await notify(C, "summary", { title: "Підсумок тижня", body: text.replace(/<[^>]+>/g, "").slice(0, 180), tag: `summary|${L.day}`, url: APP_URL },
+          { parse_mode: "HTML", text, reply_markup: { inline_keyboard: [[{ text: "Відкрити додаток", url: APP_URL }]] } });
       }
     }
   }
@@ -305,7 +404,8 @@ async function onCallback(cq: any) {
     const now = new Date();
     const site = m.track_sites ? await suggestSite(m.id) : null;
     const dose = doseStr ? Number(doseStr) : null;
-    const { error } = await sb.from("intakes").insert({ user_id: st.user_id, med_id: m.id, day, status: "taken", taken_at: now.toISOString(), dose, site, source: "telegram" });
+    const dose_mg = m.track_sites ? st.mj_dose_mg ?? null : null;
+    const { error } = await sb.from("intakes").insert({ user_id: st.user_id, med_id: m.id, day, status: "taken", taken_at: now.toISOString(), dose, dose_mg, site, source: "telegram" });
     if (error) { await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Помилка, спробуй у додатку" }); return; }
     let line = `✅ Відмічено о ${L.hm}` + (dose ? ` · ${dose} таб.` : "") + (site ? ` · ${esc(site)}` : "");
     if (/до їжі/.test(m.note ?? "")) line += `\nЇсти можна з ${fromMin(L.min + 120)}`;
@@ -335,6 +435,11 @@ Deno.serve(async (req) => {
       if (!m) return Response.json({ error: "no med" });
       const n = await pushTo(data ?? [], pushPayload(m as Med, local("Europe/Amsterdam").day, false));
       return Response.json({ delivered: n });
+    }
+    if (action === "testsummary") {
+      const { data: u } = await sb.from("settings").select("*").limit(1).single();
+      const { data: meds } = await sb.from("meds").select("*").eq("user_id", u.user_id).eq("active", true);
+      return Response.json({ text: await weeklySummary(u, (meds ?? []) as Med[], local(u.tz).day) });
     }
     if (action === "setup") {
       const me = await tg("getMe", {});
