@@ -214,3 +214,10 @@ input,select,textarea{font-size:16px !important}
 .cb{width:28px;height:28px;border-radius:9px;border:2px solid #d9d4e3;display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0}
 .cb.on{background:var(--ok);border-color:var(--ok)}
 .panel.warn{background:#fde8e3;color:#7a2512}.panel.warn p{color:#7a2512}
+
+.meas{border:2px solid var(--line);border-radius:16px;padding:0 14px}
+.meas summary{min-height:48px;display:flex;align-items:center;font-size:15px;font-weight:800;cursor:pointer;list-style:none}
+.meas summary::after{content:'＋';margin-left:auto;color:var(--accent)}
+.meas[open] summary::after{content:'−'}
+.meas[open]{padding-bottom:14px;display:flex;flex-direction:column;gap:12px}
+.meas .lbl small{font-weight:500;color:var(--muted);font-size:12px}

@@ -644,6 +644,15 @@ function mjWater() {
       <button class="btn" data-a="mjsleep">Зберегти сон</button></div>`;
 }
 
+const MEASURES = [
+  ['waist_cm', 'Талія', 'найвужче місце, приблизно на 2–3 см вище пупка'],
+  ['belly_cm', 'Живіт', 'на рівні пупка'],
+  ['hips_cm', 'Стегна (сідниці)', 'по найширшій частині сідниць, ноги разом'],
+  ['chest_cm', 'Груди', 'під пахвами, по найвищій точці грудей'],
+  ['thigh_cm', 'Стегно', 'найширше місце одного стегна, завжди тієї самої ноги'],
+  ['arm_cm', 'Плече', 'посередині між плечем і ліктем, рука розслаблена']
+];
+const n1 = (v) => String(Math.round(v * 10) / 10).replace('.', ',');
 function mjWeight() {
   const st = S.settings || {}; const rows = S.mj.body.filter((b) => b.weight_kg != null);
   const start = Number(st.weight_start || rows[0]?.weight_kg || 0), goal = Number(st.weight_goal || 0);
@@ -658,14 +667,28 @@ function mjWeight() {
       ${pts.map((p, i) => `<circle cx="${X(i)}" cy="${Y(p.v)}" r="5" fill="#6c5ce7"/>`).join('')}</svg>`;
   }
   const cur = rows.length ? Number(rows[rows.length - 1].weight_kg) : start;
-  const list = [...S.mj.body].reverse().slice(0, 8).map((b) => `<div class="mrow"><span class="f"><b>${esc(fmtDay(b.day, { day: 'numeric', month: 'long' }))}</b><small>${b.weight_kg != null ? String(b.weight_kg).replace('.', ',') + ' кг' : ''}${b.weight_kg != null && b.waist_cm != null ? ' · ' : ''}${b.waist_cm != null ? 'талія ' + String(b.waist_cm).replace('.', ',') + ' см' : ''}</small></span><button class="shx" data-a="mjbdel" data-id="${b.id}" aria-label="Видалити">✕</button></div>`).join('');
+  const list = [...S.mj.body].reverse().slice(0, 10).map((b) => {
+    const parts = [b.weight_kg != null ? n1(b.weight_kg) + ' кг' : null, ...MEASURES.filter(([f]) => b[f] != null).map(([f, l]) => `${l.split(' ')[0].toLowerCase()} ${n1(b[f])}`)].filter(Boolean);
+    return `<div class="mrow"><span class="f"><b>${esc(fmtDay(b.day, { day: 'numeric', month: 'long' }))}</b><small>${esc(parts.join(' · '))}</small></span><button class="shx" data-a="mjbdel" data-id="${b.id}" aria-label="Видалити">✕</button></div>`;
+  }).join('');
+  // зміни обʼємів: перший замір → останній
+  const mrows = MEASURES.map(([f, l]) => {
+    const vals = S.mj.body.filter((b) => b[f] != null); if (!vals.length) return '';
+    const a = Number(vals[0][f]), z = Number(vals[vals.length - 1][f]); const d = Math.round((z - a) * 10) / 10;
+    return `<div class="row" style="color:var(--ink);font-weight:500"><span>${l}</span><span><b>${n1(z)} см</b>${vals.length > 1 ? ` <small style="color:${d <= 0 ? 'var(--ok-ink)' : '#b45309'}">${d <= 0 ? '−' : '+'}${n1(Math.abs(d))}</small>` : ''}</span></div>`;
+  }).join('');
   return mjHead('Вага й обʼєми', 'Раз на тиждень, зранку') + `
     <div class="panel"><div class="row" style="color:var(--ink)"><span style="font-size:28px;font-weight:800">${cur ? String(cur).replace('.', ',') : '—'} <span style="font-size:15px;color:var(--muted)">кг</span></span>
       <span style="font-size:12px">${start && cur ? (cur <= start ? '−' : '+') + String(Math.abs(Math.round((start - cur) * 10) / 10)).replace('.', ',') + ' кг від старту' : ''}${goal && cur ? ' · до цілі ' + String(Math.max(0, Math.round((cur - goal) * 10) / 10)).replace('.', ',') : ''}</span></div>${chart}</div>
     <div class="panel"><h3>Новий запис</h3>
-      <div class="opts"><label class="lbl">Вага, кг<input type="number" step="0.1" inputmode="decimal" data-bin="w" placeholder="напр. 107,4"></label><label class="lbl">Талія, см<input type="number" step="0.5" inputmode="decimal" data-bin="waist" placeholder="раз на 2–4 тиж."></label></div>
-      <button class="btn" data-a="mjbody">Зберегти за сьогодні</button>
-      <p style="font-size:12px">Зважуйся в той самий день тижня, зранку, після туалету — так цифри можна порівнювати.</p></div>
+      <label class="lbl">Вага, кг<input type="number" step="0.1" inputmode="decimal" data-bin="weight_kg" placeholder="напр. 107,4"></label>
+      <p style="font-size:12px">Зважуйся в той самий день тижня, зранку, після туалету — так цифри можна порівнювати.</p>
+      <details class="meas"><summary>Обʼєми, см · раз на 2–4 тижні</summary>
+        ${MEASURES.map(([f, l, hint]) => `<label class="lbl">${l}<small>${hint}</small><input type="number" step="0.5" inputmode="decimal" data-bin="${f}" placeholder="см"></label>`).join('')}
+        <p style="font-size:12px">Міряй зранку, стоячи, розслаблено, на видиху. Сантиметр горизонтально, щільно, але не втискаючи.</p>
+      </details>
+      <button class="btn" data-a="mjbody">Зберегти за сьогодні</button></div>
+    ${mrows ? `<div class="panel"><h3>Обʼєми · зміна від першого заміру</h3>${mrows}</div>` : ''}
     ${list ? `<div class="panel"><h3>Історія</h3>${list}</div>` : ''}
     <div class="panel"><h3>Старт і ціль</h3>
       <div class="opts"><label class="lbl">Стартова вага, кг<input type="number" step="0.1" inputmode="decimal" data-gin="start" value="${st.weight_start ?? ''}"></label><label class="lbl">Ціль, кг<input type="number" step="0.1" inputmode="decimal" data-gin="goal" value="${st.weight_goal ?? ''}"></label></div>
@@ -741,11 +764,12 @@ document.addEventListener('click', async (e) => {
     S.mj.checkins = S.mj.checkins.filter((c) => !(c.day === today && c.slot === 'morning')).concat(data); S.sleepDraft = null; render(); toast('Сон збережено');
   }
   else if (a === 'mjbody') {
-    const w = parseFloat(String(document.querySelector('[data-bin="w"]')?.value || '').replace(',', '.'));
-    const waist = parseFloat(String(document.querySelector('[data-bin="waist"]')?.value || '').replace(',', '.'));
-    if (!(w > 30 && w < 300) && !(waist > 30 && waist < 250)) return toast('Введи вагу або талію');
-    const prev = S.mj.body.find((b) => b.day === today);
-    const row = { day: today, weight_kg: w > 30 && w < 300 ? w : prev?.weight_kg ?? null, waist_cm: waist > 30 && waist < 250 ? waist : prev?.waist_cm ?? null };
+    const val = (f) => parseFloat(String(document.querySelector(`[data-bin="${f}"]`)?.value || '').replace(',', '.'));
+    const prev = S.mj.body.find((b) => b.day === today) || {};
+    const row = { day: today }; let any = false;
+    const w = val('weight_kg'); if (w > 30 && w < 300) { row.weight_kg = w; any = true; } else row.weight_kg = prev.weight_kg ?? null;
+    for (const [f] of MEASURES) { const v = val(f); if (v > 10 && v < 250) { row[f] = v; any = true; } else row[f] = prev[f] ?? null; }
+    if (!any) return toast('Введи вагу або хоча б один обʼєм');
     const { data, error } = await sb.from('body_logs').upsert(row, { onConflict: 'user_id,day' }).select().single();
     if (error) return toast('Не вдалося зберегти: ' + error.message);
     S.mj.body = S.mj.body.filter((b) => b.day !== today).concat(data).sort((x, y) => x.day < y.day ? -1 : 1); render(); toast('Збережено');
@@ -1031,7 +1055,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 15;
+const APP_VERSION = 16;
 // заборона зуму щипком і подвійним тапом (iOS ігнорує user-scalable=no у деяких режимах)
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 && e.cancelable) e.preventDefault(); }, { passive: false });
