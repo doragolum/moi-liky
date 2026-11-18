@@ -35,6 +35,7 @@ const activeMeds = () => S.meds.filter((m) => m.active);
 const wdays = (m) => m.weekdays?.length ? m.weekdays : (m.weekday != null ? [m.weekday] : []);
 function dueOn(m, s) {
   if (!m.active) return false;
+  if (m.start_date && s < m.start_date) return false;
   if (m.kind === 'daily') return true;
   const d = parseYmd(s);
   if (m.kind === 'weekly') return wdays(m).includes(d.getDay());
@@ -50,6 +51,19 @@ function nextDue(m, from = todayStr()) {
   const d = parseYmd(from);
   for (let i = 0; i < 400; i++) { const s = ymd(d); if (dueOn(m, s)) return { day: s, until: i }; d.setDate(d.getDate() + 1); }
   return null;
+}
+function sinceLabel(start) {
+  if (!start) return '';
+  const today = todayStr();
+  if (start > today) { const d = Math.round((parseYmd(start) - parseYmd(today)) / 86400000); return d === 1 ? 'старт завтра' : `старт через ${d} дн.`; }
+  const a = parseYmd(start), b = parseYmd(today);
+  let months = (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth());
+  if (b.getDate() < a.getDate()) months--;
+  const anchor = new Date(a); anchor.setMonth(a.getMonth() + months);
+  const days = Math.round((b - anchor) / 86400000);
+  if (months <= 0) return days === 0 ? 'старт сьогодні' : `приймаю ${days + 1} дн.`;
+  const y = Math.floor(months / 12), mo = months % 12;
+  return 'приймаю ' + [y ? `${y} р.` : '', mo ? `${mo} міс.` : '', days ? `${days} дн.` : ''].filter(Boolean).join(' ');
 }
 function schedLabel(m) {
   if (m.kind === 'daily') return 'щодня';
@@ -332,6 +346,7 @@ function medsView() {
     const nxt = nx ? (nx.until === 0 ? ' · сьогодні' : nx.until === 1 ? ' · завтра' : ' · наступний ' + fmtDay(nx.day, { day: 'numeric', month: 'long' })) : '';
     return `<button class="mrow mbtn ${m.active ? '' : 'paused'}" data-a="edopen" data-id="${m.id}"><i style="background:${m.color}"></i><span class="f"><b>${esc(m.name)}${m.active ? '' : ' · на паузі'}</b>
       <small>${esc(m.dose_label)} · ${esc(schedLabel(m))}, ${planHM(m)}${esc(nxt)}</small>
+      ${m.start_date ? `<small>з ${esc(fmtDay(m.start_date, { day: 'numeric', month: 'long', year: 'numeric' }))} · ${esc(sinceLabel(m.start_date))}</small>` : ''}
       <small>${m.note ? esc(m.note) + ' · ' : ''}нагадування за ${m.remind_before_min} хв${m.followup_after_min ? `, повтор через ${m.followup_after_min} хв` : ''}</small></span>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>`;
   }).join('');
@@ -802,6 +817,13 @@ document.addEventListener('click', async (e) => {
   }
   else if (a === 'mjrem') updateSettings({ checkin_reminders: !S.settings.checkin_reminders });
 });
+// дата старту: перемалювати редактор лише після вибору (щоб не закривати календар iOS)
+document.addEventListener('change', (e) => {
+  if (e.target.dataset?.ein !== 'start_date' || !S.ed) return;
+  S.ed.start_date = e.target.value;
+  if (S.ed.start_date && S.ed.kind === 'weekly' && S.ed.weekdays.length <= 1) S.ed.weekdays = [parseYmd(S.ed.start_date).getDay()];
+  renderEditor();
+});
 document.addEventListener('input', (e) => {
   const d = e.target.dataset || {};
   if (d.cin && S.ck) S.ck[d.cin] = e.target.value;
@@ -814,7 +836,7 @@ function openEditor(id) {
   const m = id ? S.meds.find((x) => x.id === id) : null;
   S.ed = m ? {
     id: m.id, name: m.name, inj: !!m.track_sites, dose_label: m.dose_label, doses: (m.dose_options || []).join(', '),
-    kind: m.kind, weekdays: [...wdays(m)], interval_days: m.interval_days || 2, start_date: m.start_date || todayStr(),
+    kind: m.kind, weekdays: [...wdays(m)], interval_days: m.interval_days || 2, start_date: m.start_date || '',
     plan_time: planHM(m), window_label: m.window_label || '', note: m.note || '', color: m.color,
     remind: m.remind_before_min, follow: m.followup_after_min, active: m.active, confirmDel: false, err: ''
   } : { id: null, name: '', inj: false, dose_label: '', doses: '', kind: 'daily', weekdays: [], interval_days: 2, start_date: todayStr(),
@@ -829,8 +851,7 @@ function renderEditor() {
   const sched = e.kind === 'weekly'
     ? `<div class="days">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<button type="button" class="opt ${e.weekdays.includes(d) ? 'on' : ''}" data-a="edday" data-v="${d}">${WD_SHORT[d]}</button>`).join('')}</div>`
     : e.kind === 'interval'
-      ? `<div class="row">Кожні<input type="number" min="2" max="365" inputmode="numeric" data-ein="interval_days" value="${e.interval_days}" style="width:90px">днів</div>
-         <label class="row">Починаючи з<input type="date" data-ein="start_date" value="${esc(e.start_date)}"></label>` : '';
+      ? `<div class="row">Кожні<input type="number" min="2" max="365" inputmode="numeric" data-ein="interval_days" value="${e.interval_days}" style="width:90px">днів</div>` : '';
   root.innerHTML = `<div class="ov" role="dialog" aria-modal="true" aria-label="Ліки"><button class="bg" data-a="edclose" aria-label="Закрити"></button>
     <div class="sh"><span class="grab"></span><div class="shh"><div class="ttl">${e.id ? 'Змінити ліки' : 'Нові ліки'}</div><button class="shx" data-a="edclose" aria-label="Закрити"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
     <label class="lbl">Назва<input type="text" data-ein="name" value="${esc(e.name)}" placeholder="Напр. Вітамін D"></label>
@@ -838,6 +859,8 @@ function renderEditor() {
     <label class="lbl">Дозування<input type="text" data-ein="dose_label" value="${esc(e.dose_label)}" placeholder="Напр. 2 × 50 мг або 1 таблетка"></label>
     ${e.inj ? '' : `<label class="lbl">Варіанти кількості (необовʼязково)<input type="text" inputmode="numeric" data-ein="doses" value="${esc(e.doses)}" placeholder="Напр. 2, 3 — зʼявляться кнопки вибору"></label>`}
     <div class="lbl">Періодичність${seg('kind', [['daily', 'Щодня'], ['weekly', 'Дні тижня'], ['interval', 'Кожні N днів']])}${sched}</div>
+    <label class="row">Дата старту<input type="date" data-ein="start_date" value="${esc(e.start_date)}"></label>
+    <p style="font-size:12px;margin-top:-6px" id="ed-since">${e.start_date ? esc(sinceLabel(e.start_date)) + (e.kind === 'weekly' && e.weekdays.length === 1 ? ' · день тижня підлаштовується під дату старту' : '') : 'Необовʼязково. Якщо вказати — до цієї дати ліки не плануються, а тут видно, скільки вже приймаєш.'}</p>
     <label class="row">Час прийому<input type="time" data-ein="plan_time" value="${esc(e.plan_time)}"></label>
     <label class="lbl">Проміжок (необовʼязково)<input type="text" data-ein="window_label" value="${esc(e.window_label)}" placeholder="Напр. 9:00–10:00"></label>
     <label class="lbl">Примітка<input type="text" data-ein="note" value="${esc(e.note)}" placeholder="Напр. після їжі / за 2 год до їжі"></label>
@@ -858,11 +881,12 @@ async function saveEditor() {
   if (e.kind === 'weekly' && !e.weekdays.length) { e.err = 'Вибери хоча б один день тижня'; return renderEditor(); }
   const iv = Number(e.interval_days);
   if (e.kind === 'interval' && !(iv >= 2 && iv <= 365)) { e.err = 'Інтервал — від 2 до 365 днів'; return renderEditor(); }
+  if (e.kind === 'interval' && !e.start_date) e.start_date = todayStr();
   const doses = e.inj ? [] : e.doses.split(/[,;\s]+/).map(Number).filter((n) => n > 0 && n < 100);
   const row = {
     name: e.name.trim(), dose_label: e.dose_label.trim(), dose_options: doses.length ? doses : null, track_sites: e.inj,
     kind: e.kind, weekdays: e.kind === 'weekly' ? e.weekdays : null, weekday: e.kind === 'weekly' ? e.weekdays[0] : null,
-    interval_days: e.kind === 'interval' ? iv : null, start_date: e.kind === 'interval' ? e.start_date : null,
+    interval_days: e.kind === 'interval' ? iv : null, start_date: e.start_date || null,
     plan_time: e.plan_time, window_label: e.window_label.trim() || null, note: e.note.trim() || null, color: e.color,
     remind_before_min: Number(e.remind), followup_after_min: Number(e.follow), active: e.active
   };
@@ -1024,7 +1048,10 @@ document.addEventListener('click', async (e) => {
 });
 
 document.addEventListener('input', (e) => {
-  const ef = e.target.dataset?.ein; if (ef && S.ed) { S.ed[ef] = e.target.value; return; }
+  const ef = e.target.dataset?.ein; if (ef && S.ed) {
+    S.ed[ef] = e.target.value;
+    return;
+  }
   const f = e.target.dataset?.in; if (!f || !S.sheet) return;
   S.sheet[f] = e.target.value;
   if (f === 'time') { const b = document.querySelector('[data-a="ssave"]'); if (b) b.textContent = `${S.sheet.m.track_sites ? 'Відмітити укол' : 'Прийняла'} · ${e.target.value}`; }
@@ -1091,7 +1118,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 19;
+const APP_VERSION = 20;
 // ---- тема: light / dark / auto ----
 const THEME_KEY = 'moi-liky-theme';
 const getTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'light'; } catch (_) { return 'light'; } };

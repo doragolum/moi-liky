@@ -76,6 +76,7 @@ function local(tz: string, d = new Date()) {
 }
 function dueOn(m: Med, day: string, dow: number) {
   if (!m.active) return false;
+  if (m.start_date && day < m.start_date) return false;
   if (m.kind === "daily") return true;
   if (m.kind === "weekly") return (m.weekdays?.length ? m.weekdays : m.weekday != null ? [m.weekday] : []).includes(dow);
   if (m.kind === "interval") {
