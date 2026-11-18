@@ -1091,7 +1091,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 18;
+const APP_VERSION = 19;
 // ---- тема: light / dark / auto ----
 const THEME_KEY = 'moi-liky-theme';
 const getTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'light'; } catch (_) { return 'light'; } };
