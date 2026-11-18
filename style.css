@@ -240,3 +240,8 @@ html[data-theme=dark] .hint{background:var(--warn-soft);color:var(--warn-ink)}
 html[data-theme=dark] .hint.ok{background:var(--ok-soft2);color:var(--ok-ink)}
 html[data-theme=dark] .chip.skip{background:var(--soft2);color:var(--muted2)}
 html[data-theme=dark] .err{color:#ff8a7a}
+
+.late{margin:12px 22px 0;padding:16px;border-radius:22px;background:var(--warn-soft);color:var(--warn-ink);display:flex;flex-direction:column;gap:8px}
+.late b{font-size:15px}.late span{font-size:13px;line-height:1.4}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.late .btn{min-height:46px;font-size:14px}

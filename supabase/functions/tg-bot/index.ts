@@ -178,6 +178,33 @@ async function tick() {
       }
     }
 
+    // пропущені дози, які ще можна зробити (late_window_days) — одне нагадування на день у плановий час
+    for (const m of (meds ?? []) as (Med & { late_window_days?: number })[]) {
+      const w = m.late_window_days || 0; if (!w || m.kind === "daily") continue;
+      if (dueOn(m, L.day, L.dow)) continue;
+      const plan = toMin(m.plan_time.slice(0, 5));
+      if (L.min < plan - m.remind_before_min || L.min > plan + WINDOW_AFTER_MIN) continue;
+      const base = Date.parse(L.day + "T00:00:00Z");
+      for (let i = 1; i <= w; i++) {
+        const dt = new Date(base - i * 86400000); const d = dt.toISOString().slice(0, 10);
+        if (!dueOn(m, d, dt.getUTCDay())) continue;
+        const { data: has } = await sb.from("intakes").select("id").eq("med_id", m.id).eq("day", d).maybeSingle();
+        if (has) break;
+        const { data: ins } = await sb.from("reminders_log").upsert({ med_id: m.id, day: L.day, kind: "late" }, { onConflict: "med_id,day,kind", ignoreDuplicates: true }).select();
+        if (!ins?.length) break;
+        const left = w - i;
+        const dn = new Intl.DateTimeFormat("uk-UA", { weekday: "long", timeZone: "UTC" }).format(dt);
+        const when = left === 0 ? "лише сьогодні" : `сьогодні або ще ${left} дн.`;
+        if (subs.length) sent += await pushTo(subs, { title: `Пропущено: ${m.name}`, body: `Доза за ${dn}. Можна зробити ${when}.`, tag: `${m.id}|${d}`, url: `${APP_URL}?q=${m.id}&d=${d}&f=1` });
+        if (tgOn) {
+          const p = await reminderPayload(m, d, true);
+          p.text = `<b>${esc(m.name)}</b>: доза за ${dn} не відмічена. Можна зробити ${when}, потім краще пропустити.`;
+          await tg("sendMessage", { chat_id: u.telegram_chat_id, parse_mode: "HTML", ...p }); sent++;
+        }
+        break;
+      }
+    }
+
     // відкладені («через 15 хв»)
     const { data: sn } = await sb.from("snoozes").select("*").in("med_id", ids).eq("sent", false).lte("due_at", new Date().toISOString());
     for (const s of sn ?? []) {

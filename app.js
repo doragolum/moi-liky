@@ -128,6 +128,20 @@ function takenAtFor(day, hhmm) {
   const d = parseYmd(day); const [h, m] = hhmm.split(':').map(Number); d.setHours(h, m, 0, 0); return d.toISOString();
 }
 const timeOf = (r) => r && r.taken_at ? hm(new Date(r.taken_at)) : '';
+// час із днем тижня, якщо зроблено не в запланований день (із запізненням)
+const whenOf = (r) => { if (!r?.taken_at) return ''; const d = new Date(r.taken_at); return ymd(d) !== r.day ? `${d.toLocaleDateString('uk-UA', { weekday: 'short' })} ${hm(d)}` : hm(d); };
+// пропущена доза, яку ще можна зробити (вікно late_window_days)
+function overdue(m) {
+  const w = m.late_window_days || 0; if (!w || !m.active || m.kind === 'daily') return null;
+  const t = parseYmd(todayStr());
+  for (let i = 1; i <= w; i++) {
+    const d = new Date(t); d.setDate(t.getDate() - i); const s = ymd(d);
+    if (dueOn(m, s)) { if (S.intakes.get(k(m.id, s))) return null; return { day: s, left: w - i }; }
+  }
+  return null;
+}
+// скільки днів до наступного планового прийому після сьогодні
+function daysToNext(m) { const t = new Date(parseYmd(todayStr())); t.setDate(t.getDate() + 1); const n = nextDue(m, ymd(t)); return n ? n.until + 1 : null; }
 
 function lastSite(med) {
   let best = null;
@@ -264,7 +278,7 @@ function injHtml(m, day = todayStr()) {
   const done = r && r.status === 'taken'; const future = day > today;
   const when = day === today ? 'Сьогодні' : fmtDay(day, { weekday: 'long' }).replace(/^./, (c) => c.toUpperCase());
   let sub, site;
-  if (done) { sub = `Зроблено о ${timeOf(r)}`; site = r.site || ''; }
+  if (done) { sub = `Зроблено ${whenOf(r)}`; site = r.site || ''; }
   else if (r) { sub = `${when} — пропуск`; site = ''; }
   else { sub = `${when}, ${planHM(m)} · ${m.dose_label}`; site = 'Місце: ' + suggestSite(m).toLowerCase(); }
   return `<div class="inj"><span class="ico">${ICON_SYR('#d8cffc')}</span>
@@ -281,7 +295,13 @@ function todayView() {
   const tip = isToday ? 'Картка — деталі, кнопка — швидко' : future ? 'План на цей день' : 'Можна відмітити заднім числом';
   const empty = !ms.length ? `<div class="panel"><p>${isToday ? 'Сьогодні' : 'Цього дня'} нічого не заплановано.</p></div>` : '';
   const back = isToday ? '' : '<button class="btn link" data-a="wpick" data-day="">← Повернутись до сьогодні</button>';
-  return headerHtml() + weekHtml() +
+  const late = isToday ? activeMeds().map((m) => ({ m, o: overdue(m) })).filter((x) => x.o).map(({ m, o }) => {
+    const until = new Date(parseYmd(o.day)); until.setDate(until.getDate() + (m.late_window_days || 0));
+    return `<div class="late"><b>${esc(m.name)}: пропущено ${esc(fmtDay(o.day, { weekday: 'long', day: 'numeric', month: 'long' }))}</b>
+      <span>Можна зробити ${o.left === 0 ? 'лише сьогодні' : 'до ' + esc(fmtDay(ymd(until), { weekday: 'long' }))} включно. Потім цю дозу краще пропустити.</span>
+      <div class="two"><button class="btn" data-a="open" data-id="${m.id}" data-day="${o.day}" data-late="1">${m.track_sites ? 'Зробила зараз' : 'Прийняла зараз'}</button><button class="btn ghost" data-a="lateskip" data-id="${m.id}" data-day="${o.day}">Пропустити дозу</button></div></div>`;
+  }).join('') : '';
+  return headerHtml() + weekHtml() + late +
     `<div class="sec"><h2>${esc(title)}</h2><span class="tip">${tip}</span></div>
      <div class="list">${pills.map((m) => medCardHtml(m, day)).join('')}</div>` + inj.map((m) => injHtml(m, day)).join('') + empty + back;
 }
@@ -318,7 +338,7 @@ function historyView() {
   const rows = dayMeds(sel).map((m) => {
     const r = S.intakes.get(k(m.id, sel));
     let st, col;
-    if (r && r.status === 'taken') { st = timeOf(r) + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : ''); col = '#c6f36b'; }
+    if (r && r.status === 'taken') { st = whenOf(r) + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : ''); col = '#c6f36b'; }
     else if (r) { st = 'пропуск'; col = '#d4cfe6'; }
     else { st = sel === today ? 'ще ні' : 'не відмічено'; col = sel === today ? '#d4cfe6' : '#ffb4a2'; }
     return `<button class="drow" data-a="open" data-id="${m.id}" data-day="${sel}"><span class="r"><i style="background:${m.color}"></i><span class="f">${esc(m.name)}</span><b style="color:${col}">${esc(st)}</b></span>${r && r.note ? `<span class="nt">${esc(r.note)}</span>` : ''}</button>`;
@@ -498,10 +518,10 @@ function quickDone(msg) {
 }
 
 // ---------- sheet ----------
-function openSheet(medId, day) {
+function openSheet(medId, day, late = false) {
   const m = S.meds.find((x) => x.id === medId); if (!m) return;
   const today = todayStr();
-  S.sheet = { m, day, edit: false, mode: day === today ? 'now' : 'custom', time: day === today ? hm(new Date()) : planHM(m),
+  S.sheet = { m, day, late, edit: false, mode: day === today || late ? 'now' : 'custom', time: day === today ? hm(new Date()) : planHM(m),
     dose: m.dose_options?.[0] ?? null, site: m.track_sites ? suggestSite(m) : null, note: '' };
   const r = S.intakes.get(k(m.id, day));
   if (r) { S.sheet.note = r.note || ''; if (r.dose) S.sheet.dose = r.dose; if (r.site) S.sheet.site = r.site; if (r.taken_at) { S.sheet.time = timeOf(r); S.sheet.mode = 'custom'; } }
@@ -516,7 +536,7 @@ function renderSheet() {
   const dayLbl = day === today ? 'сьогодні' : fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' });
   let body;
   if (r && !sh.edit) {
-    const t = r.status === 'skipped' ? 'Відмічено як пропуск' : `Відмічено о ${timeOf(r)}` + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : '');
+    const t = r.status === 'skipped' ? 'Відмічено як пропуск' : `Відмічено ${ymd(new Date(r.taken_at)) !== r.day ? fmtDay(ymd(new Date(r.taken_at)), { weekday: 'long' }) + ' о ' + timeOf(r) + ' (із запізненням)' : 'о ' + timeOf(r)}` + (r.dose && m.dose_options?.length ? ` · ${r.dose} таб.` : '') + (r.site ? ` · ${r.site}` : '');
     body = `<div class="done-box ${r.status === 'skipped' ? 'skip' : ''}">${esc(t)}${r.note ? '<br>' + esc(r.note) : ''}${r.source === 'telegram' ? '<br><small>через Telegram</small>' : ''}</div>
       <button class="btn ghost" data-a="sedit">Змінити</button>
       <button class="btn link" data-a="sdel">Скасувати відмітку</button>`;
@@ -525,11 +545,13 @@ function renderSheet() {
     const sug = m.track_sites ? suggestSite(m) : null; const ls = m.track_sites ? lastSite(m) : null;
     const sites = m.track_sites ? `<div class="lbl">Місце уколу<div class="opts">${SITES.map((s) => `<button class="opt ${sh.site === s ? 'on' : ''}" data-a="ssite" data-v="${esc(s)}">${esc(s)}${s === sug ? '<small>за чергуванням</small>' : ''}</button>`).join('')}</div>
       <span style="font-weight:500;font-size:12px;color:var(--muted)">${ls ? 'Минулого разу: ' + esc(ls.site) + ', ' + esc(fmtDay(ls.day, { day: 'numeric', month: 'long' })) : 'Перший укол — з нього почнеться історія місць'}</span></div>` : '';
-    const timeSel = day === today
+    const timeSel = day === today || sh.late
       ? `<div class="opts"><button class="opt ${sh.mode === 'now' ? 'on' : ''}" data-a="smode" data-v="now">Зараз · ${hm(new Date())}</button><button class="opt ${sh.mode === 'custom' ? 'on' : ''}" data-a="smode" data-v="custom">Вказати час</button></div>` : '';
     const timeIn = sh.mode === 'custom' ? `<label class="row">Коли<input type="time" data-in="time" value="${esc(sh.time)}"></label>` : '';
     const tShow = sh.mode === 'now' ? hm(new Date()) : sh.time;
-    body = `${doses}${sites}${timeSel}${timeIn}
+    const gap = sh.late ? daysToNext(m) : null;
+    const lateInfo = sh.late ? `<div class="done-box skip">Доза за ${esc(fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' }))}, робиш сьогодні.${gap != null && gap < 3 ? ` Наступна за планом через ${gap} дн. — між уколами має бути щонайменше 3 дні, уточни з лікарем, чи зсунути наступну.` : ''}</div>` : '';
+    body = `${lateInfo}${doses}${sites}${timeSel}${timeIn}
       <label class="lbl">Коментар (не обовʼязково)<textarea rows="2" data-in="note" placeholder="Наприклад: поїла раніше, нудило…">${esc(sh.note)}</textarea></label>
       <button class="btn" data-a="ssave">${m.track_sites ? 'Відмітити укол' : 'Прийняла'} · ${tShow}</button>
       <button class="btn link" data-a="sskip">${day === today ? 'Пропускаю сьогодні' : 'Відмітити як пропуск'}</button>`;
@@ -838,8 +860,8 @@ function openEditor(id) {
     id: m.id, name: m.name, inj: !!m.track_sites, dose_label: m.dose_label, doses: (m.dose_options || []).join(', '),
     kind: m.kind, weekdays: [...wdays(m)], interval_days: m.interval_days || 2, start_date: m.start_date || '',
     plan_time: planHM(m), window_label: m.window_label || '', note: m.note || '', color: m.color,
-    remind: m.remind_before_min, follow: m.followup_after_min, active: m.active, confirmDel: false, err: ''
-  } : { id: null, name: '', inj: false, dose_label: '', doses: '', kind: 'daily', weekdays: [], interval_days: 2, start_date: todayStr(),
+    remind: m.remind_before_min, follow: m.followup_after_min, late: m.late_window_days || 0, active: m.active, confirmDel: false, err: ''
+  } : { late: 0, id: null, name: '', inj: false, dose_label: '', doses: '', kind: 'daily', weekdays: [], interval_days: 2, start_date: todayStr(),
     plan_time: '09:00', window_label: '', note: '', color: COLORS[S.meds.length % COLORS.length], remind: 5, follow: 15, active: true, confirmDel: false, err: '' };
   renderEditor();
 }
@@ -866,6 +888,7 @@ function renderEditor() {
     <label class="lbl">Примітка<input type="text" data-ein="note" value="${esc(e.note)}" placeholder="Напр. після їжі / за 2 год до їжі"></label>
     <div class="lbl">Колір<div class="colors">${COLORS.map((c) => `<button type="button" class="clr ${e.color === c ? 'on' : ''}" style="background:${c}" data-a="edcolor" data-v="${c}" aria-label="Колір"></button>`).join('')}</div></div>
     <label class="row">Нагадати за${sel('remind', [0, 5, 10, 15, 30, 60], (v) => v ? v + ' хв' : 'у час прийому')}</label>
+    ${e.kind !== 'daily' ? `<label class="row">Пропущену дозу можна зробити${sel('late', [0, 1, 2, 3, 4, 5, 6], (v) => v ? 'до ' + v + ' дн. пізніше' : 'не можна')}</label>` : ''}
     <label class="row">Повтор, якщо не відмічено${sel('follow', [0, 10, 15, 30, 60], (v) => v ? 'через ' + v + ' хв' : 'не повторювати')}</label>
     ${e.id ? `<div class="nrow"><span>Активні<small>Вимкни, щоб поставити на паузу без втрати історії</small></span><button type="button" class="sw" role="switch" aria-checked="${e.active}" data-a="edactive" aria-label="Активні"></button></div>` : ''}
     ${e.err ? `<div class="err">${esc(e.err)}</div>` : ''}
@@ -888,7 +911,7 @@ async function saveEditor() {
     kind: e.kind, weekdays: e.kind === 'weekly' ? e.weekdays : null, weekday: e.kind === 'weekly' ? e.weekdays[0] : null,
     interval_days: e.kind === 'interval' ? iv : null, start_date: e.start_date || null,
     plan_time: e.plan_time, window_label: e.window_label.trim() || null, note: e.note.trim() || null, color: e.color,
-    remind_before_min: Number(e.remind), followup_after_min: Number(e.follow), active: e.active
+    remind_before_min: Number(e.remind), followup_after_min: Number(e.follow), late_window_days: e.kind === 'daily' ? 0 : Number(e.late || 0), active: e.active
   };
   let res;
   if (e.id) res = await sb.from('meds').update(row).eq('id', e.id).select().single();
@@ -985,7 +1008,8 @@ document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-a]'); if (!el) return;
   const a = el.dataset.a; const sh = S.sheet;
   if (a === 'nav') { S.view = el.dataset.v; S.daySel = null; S.mjSub = null; S.ck = null; if (S.view === 'history') { S.sel = null; S.month = null; } render(); window.scrollTo(0, 0); }
-  else if (a === 'open') openSheet(el.dataset.id, el.dataset.day);
+  else if (a === 'open') openSheet(el.dataset.id, el.dataset.day, el.dataset.late === '1');
+  else if (a === 'lateskip') { const m = S.meds.find((x) => x.id === el.dataset.id); await saveIntake(m, el.dataset.day, { status: 'skipped', taken_at: null, dose: null, site: null, note: 'дозу пропущено' }); toast(`${m.name} — пропуск записано`); }
   else if (a === 'quick') {
     const m = S.meds.find((x) => x.id === el.dataset.id); const day = todayStr(); const now = new Date();
     await saveIntake(m, day, { status: 'taken', taken_at: now.toISOString(), dose: m.dose_options?.[0] ?? null, note: null, site: null });
@@ -1036,8 +1060,9 @@ document.addEventListener('click', async (e) => {
   else if (a === 'smode') { sh.mode = el.dataset.v; if (sh.mode === 'custom' && !sh.time) sh.time = hm(new Date()); renderSheet(); }
   else if (a === 'ssave') {
     const { m, day } = sh; const t = sh.mode === 'now' ? hm(new Date()) : (sh.time || planHM(m));
+    const actual = sh.late ? todayStr() : day;
     S.sheet = null; renderSheet();
-    await saveIntake(m, day, { status: 'taken', taken_at: takenAtFor(day, t), dose: m.dose_options?.length ? sh.dose : null, site: m.track_sites ? sh.site : null, note: sh.note.trim() || null });
+    await saveIntake(m, day, { status: 'taken', taken_at: sh.late && sh.mode === 'now' ? new Date().toISOString() : takenAtFor(actual, t), dose: m.dose_options?.length ? sh.dose : null, site: m.track_sites ? sh.site : null, note: sh.note.trim() || null });
     toast(`${m.name} — відмічено о ${t}`);
   }
   else if (a === 'sskip') {
@@ -1118,7 +1143,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 20;
+const APP_VERSION = 21;
 // ---- тема: light / dark / auto ----
 const THEME_KEY = 'moi-liky-theme';
 const getTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'light'; } catch (_) { return 'light'; } };
