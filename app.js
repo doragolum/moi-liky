@@ -196,7 +196,7 @@ function headerHtml() {
     <div><div class="date">${esc(d.toLocaleDateString('uk-UA', { weekday: 'long', day: 'numeric', month: 'long' }))}</div>
     <h1>${greet}</h1><div class="sum">${sum}</div></div>
     <div class="ring" aria-label="Відмічено ${st.any} з ${st.n}"><svg width="80" height="80" viewBox="0 0 84 84" aria-hidden="true">
-      <circle cx="42" cy="42" r="34" fill="none" stroke="#e3ddf6" stroke-width="10"/>
+      <circle cx="42" cy="42" r="34" fill="none" style="stroke:var(--track)" stroke-width="10"/>
       <circle cx="42" cy="42" r="34" fill="none" stroke="#6c5ce7" stroke-width="10" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="${off}" transform="rotate(-90 42 42)"/>
     </svg><span>${st.any}/${st.n}</span></div></header>`;
 }
@@ -348,6 +348,8 @@ function medsView() {
       <div class="nrow"><span>Telegram<small>${linked ? 'З кнопками «Прийняла», «Через 15 хв»' : 'Ще не підключено — див. нижче'}</small></span>
         ${linked ? `<button class="sw" role="switch" aria-checked="${!!st.notify_telegram}" aria-label="Нагадування в Telegram" data-a="tgtoggle"></button>` : ''}</div>
     </div>
+    <div class="panel"><h3>Тема</h3><div class="seg">${[['light', 'Світла'], ['dark', 'Темна'], ['auto', 'Авто']].map(([v, l]) => `<button type="button" class="${getTheme() === v ? 'on' : ''}" data-a="theme" data-v="${v}">${l}</button>`).join('')}</div>
+      <p style="font-size:12px">«Авто» — як у налаштуваннях iPhone: вдень світла, ввечері темна, якщо так налаштовано.</p></div>
     <div class="panel"><h3>На головний екран</h3><p>iPhone: Safari → «Поділитися» → «На екран „Додому“». Android: Chrome → ⋮ → «Додати на головний екран».</p></div>
     <div class="panel"><button class="btn ghost" data-a="logout">Вийти з акаунта</button><p style="font-size:12px;text-align:center">Версія ${APP_VERSION}</p></div>`;
 }
@@ -616,7 +618,7 @@ function mjWater() {
     return `<div class="btl"><svg width="70" height="150" viewBox="0 0 90 190" aria-hidden="true">
       <rect x="30" y="2" width="30" height="16" rx="5" fill="#2b2540"/><rect x="18" y="16" width="54" height="10" rx="4" fill="#463d66"/>
       <clipPath id="bc${i}"><path d="M14 30 H76 L68 182 Q67 188 61 188 H29 Q23 188 22 182 Z"/></clipPath>
-      <path d="M14 30 H76 L68 182 Q67 188 61 188 H29 Q23 188 22 182 Z" fill="#ebe7fb" stroke="#d8d0fb" stroke-width="2"/>
+      <path d="M14 30 H76 L68 182 Q67 188 61 188 H29 Q23 188 22 182 Z" style="fill:var(--accent-soft);stroke:var(--track)" stroke-width="2"/>
       <rect x="0" y="${188 - Math.round(158 * f)}" width="90" height="${Math.round(158 * f)}" fill="#3fa3e0" opacity=".85" clip-path="url(#bc${i})"/>
       <path d="M76 50 Q90 52 88 80 Q86 104 72 104" fill="none" stroke="#463d66" stroke-width="7" stroke-linecap="round"/></svg>
       <small>${cap < bottle ? litres(cap) + ' л' : 'пляшка ' + (i + 1)}</small></div>`;
@@ -985,6 +987,7 @@ document.addEventListener('click', async (e) => {
     const { error } = await sb.from('snoozes').insert({ med_id: m.id, day, due_at: due.toISOString() });
     if (error) toast('Не вдалося: ' + error.message); else quickDone(`Нагадаю о ${hm(due)}`);
   }
+  else if (a === 'theme') { try { localStorage.setItem(THEME_KEY, el.dataset.v); } catch (_) {} applyTheme(); render(); }
   else if (a === 'wpick') { const d = el.dataset.day; S.daySel = d && d !== todayStr() ? d : null; render(); }
   else if (a === 'edopen') openEditor(el.dataset.id);
   else if (a === 'ednew') openEditor(null);
@@ -1088,7 +1091,17 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 17;
+const APP_VERSION = 18;
+// ---- тема: light / dark / auto ----
+const THEME_KEY = 'moi-liky-theme';
+const getTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'light'; } catch (_) { return 'light'; } };
+function applyTheme() {
+  const t = getTheme(); const dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', dark ? '#15141c' : '#f4f2fb');
+}
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applyTheme);
+applyTheme();
 // заборона зуму щипком і подвійним тапом (iOS ігнорує user-scalable=no у деяких режимах)
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
 document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 && e.cancelable) e.preventDefault(); }, { passive: false });
