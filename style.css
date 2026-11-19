@@ -280,3 +280,11 @@ html[data-theme=dark] .err{color:#ff8a7a}
   .report{margin:0;padding:0;box-shadow:none;background:#fff;color:#000;font-size:11pt}
   .report th,.report td{border-bottom:1px solid #ccc}
 }
+.daybar{margin:10px 22px 0;display:flex;align-items:center;gap:8px;padding:6px;border-radius:18px;background:var(--card);box-shadow:0 1px 2px rgba(31,29,43,.06)}
+.daybar.in{margin:0 0 4px;background:var(--soft);box-shadow:none}
+.daybar .shx{font-size:22px;line-height:1;flex:none}
+.daybar .shx:disabled{opacity:.3}
+.dbl{flex:1;position:relative;display:flex;flex-direction:column;align-items:center;gap:1px;min-height:44px;justify-content:center;color:var(--ink);text-align:center}
+.dbl b{font-size:15px;font-weight:800}
+.dbl small{font-size:11px;color:var(--muted)}
+.dbl input{position:absolute;inset:0;width:100%;height:100%;opacity:0;-webkit-appearance:none;appearance:none;border:0;margin:0;padding:0}

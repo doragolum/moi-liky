@@ -362,10 +362,14 @@ function todayView() {
     `<button class="lowstock" data-a="edopen" data-id="${m.id}">Закінчується <b>${esc(m.name)}</b>: ${n1s(st.left)} ${esc(m.stock_unit || '')} · ~${Math.floor(st.days)} дн.</button>`).join('') : '';
   // вода
   let water = '';
-  if (isToday && S.mj) {
-    const st = S.settings || {}; const goal = st.water_goal_ml || 3000; const wt = waterOn(today); const pct = Math.min(100, Math.round(wt / goal * 100));
-    water = `<div class="waterbar"><button class="wb-l" data-a="gowater"><small>Вода</small><b>${litres(wt)} / ${litres(goal)} л</b><span class="bar"><i style="width:${pct}%"></i></span></button>
-      <button class="opt" data-a="mjw" data-v="${st.bottle_ml || 1180}">+ пляшка</button><button class="opt" data-a="mjw" data-v="${st.glass_ml || 250}">+ склянка</button></div>`;
+  if (!future && S.mj) {
+    const st = S.settings || {}; const goal = st.water_goal_ml || 3000; const wt = waterOn(day); const pct = Math.min(100, Math.round(wt / goal * 100));
+    water = `<div class="waterbar"><button class="wb-l" data-a="gowater" data-day="${day}"><small>Вода${isToday ? '' : ' за цей день'}</small><b>${litres(wt)} / ${litres(goal)} л</b><span class="bar"><i style="width:${pct}%"></i></span></button>
+      <button class="opt" data-a="mjw" data-day="${day}" data-v="${st.bottle_ml || 1180}">+ пляшка</button><button class="opt" data-a="mjw" data-day="${day}" data-v="${st.glass_ml || 250}">+ склянка</button></div>`;
+    if (!isToday) {
+      const n = SLOTS.filter((x) => checkinOf(day, x.id)).length; const sl = sleepMins(checkinOf(day, 'morning'));
+      water += `<div class="two" style="margin:8px 22px 0"><button class="btn ghost" data-a="gocheck" data-v="morning" data-day="${day}">Самопочуття · ${n}/3</button><button class="btn ghost" data-a="gowater" data-day="${day}">Сон${sl != null ? ' · ' + fmtMins(sl) : ''}</button></div>`;
+    }
   }
   return headerHtml() + weekHtml() + next + late + low +
     `<div class="sec"><h2>${esc(title)}</h2>${tip ? `<span class="tip">${tip}</span>` : ''}</div>
@@ -588,7 +592,7 @@ const ICON_CHECK_L = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none
 function openQuickFromUrl(href) {
   let u; try { u = new URL(href || location.href); } catch (_) { return; }
   const cslot = u.searchParams.get('c');
-  if (cslot && SLOTS.some((x) => x.id === cslot)) { history.replaceState(null, '', location.pathname); S.sheet = null; renderSheet(); openCheckin(cslot); return; }
+  if (cslot && SLOTS.some((x) => x.id === cslot)) { history.replaceState(null, '', location.pathname); S.sheet = null; renderSheet(); S.mjDay = null; S.mjFrom = null; openCheckin(cslot); return; }
   const id = u.searchParams.get('q'); if (!id) return;
   const day = u.searchParams.get('d') || todayStr();
   const late = u.searchParams.get('f') === '1';
@@ -745,7 +749,16 @@ function sleepMins(c) {
   let d = toM(c.sleep_end) - toM(c.sleep_start); if (d < 0) d += 1440; return d;
 }
 const fmtMins = (m) => `${Math.floor(m / 60)} год${m % 60 ? ' ' + (m % 60) + ' хв' : ''}`;
-function weekDays() { const d = new Date(); const dow = (d.getDay() + 6) % 7; return [0, 1, 2, 3, 4, 5, 6].map((i) => { const x = new Date(d); x.setDate(d.getDate() - dow + i); return ymd(x); }); }
+const mjd = () => S.mjDay || todayStr();
+function shiftDay(d, n) { const x = parseYmd(d); x.setDate(x.getDate() + n); return ymd(x); }
+function dayLabel(d) { const t = todayStr(); return d === t ? 'Сьогодні' : d === shiftDay(t, -1) ? 'Вчора' : fmtDay(d, { weekday: 'short', day: 'numeric', month: 'long' }); }
+function dayBar() {
+  const d = mjd(), t = todayStr();
+  return `<div class="daybar"><button class="shx" data-a="mjday" data-v="-1" aria-label="Попередній день">‹</button>
+    <label class="dbl"><b>${esc(dayLabel(d))}</b><small>${d === t ? 'торкнись, щоб вибрати інший день' : 'запис за минулий день'}</small><input type="date" data-mjdate max="${t}" value="${d}" aria-label="Вибрати день"></label>
+    <button class="shx" data-a="mjday" data-v="1" aria-label="Наступний день" ${d >= t ? 'disabled' : ''}>›</button></div>`;
+}
+function weekDays(off = 0) { const d = new Date(); d.setDate(d.getDate() + off * 7); const dow = (d.getDay() + 6) % 7; return [0, 1, 2, 3, 4, 5, 6].map((i) => { const x = new Date(d); x.setDate(d.getDate() - dow + i); return ymd(x); }); }
 const activityOn = (day) => S.mj.activity.find((a) => a.day === day && a.done);
 const lastBody = (f) => [...S.mj.body].reverse().find((b) => b[f] != null);
 
@@ -808,7 +821,7 @@ function mjOverview() {
 }
 
 function mjWater() {
-  const today = todayStr(); const st = S.settings || {};
+  const today = mjd(); const st = S.settings || {};
   const goal = st.water_goal_ml || 3000, bottle = st.bottle_ml || 1180, glass = st.glass_ml || 250;
   const wt = waterOn(today); const n = Math.ceil(goal / bottle);
   const bottles = Array.from({ length: n }, (_, i) => {
@@ -823,11 +836,11 @@ function mjWater() {
       <small>${cap < bottle ? litres(cap) + ' л' : 'пляшка ' + (i + 1)}</small></div>`;
   }).join('');
   const log = S.mj.water.filter((w) => w.day === today).slice().reverse().map((w) =>
-    `<div class="mrow"><span class="f">+${w.ml} мл<small>${hm(new Date(w.created_at))}</small></span><button class="shx" data-a="mjwdel" data-id="${w.id}" aria-label="Видалити">✕</button></div>`).join('');
+    `<div class="mrow"><span class="f">+${w.ml} мл<small>${w.day === todayStr() ? hm(new Date(w.created_at)) : 'додано ' + esc(fmtDay(ymd(new Date(w.created_at)), { day: 'numeric', month: 'short' }))}</small></span><button class="shx" data-a="mjwdel" data-id="${w.id}" aria-label="Видалити">✕</button></div>`).join('');
   const mc = checkinOf(today, 'morning'); const ck = S.sleepDraft || { start: mc?.sleep_start?.slice(0, 5) || '', end: mc?.sleep_end?.slice(0, 5) || '', q: mc?.sleep_quality ?? null };
   S.sleepDraft = ck;
   const sm = sleepMins({ sleep_start: ck.start, sleep_end: ck.end });
-  return mjHead('Вода і сон', 'Сьогодні') + `
+  return mjHead('Вода і сон', 'Вода й сон за день') + dayBar() + `
     <div class="panel">
       <div class="row" style="color:var(--ink)"><span style="font-size:26px;font-weight:800">${litres(wt)} <span style="font-size:15px;color:var(--muted)">з ${litres(goal)} л</span></span><span style="font-size:12px">${wt >= goal ? 'ціль виконано' : 'ще ' + litres(goal - wt) + ' л'}</span></div>
       <div class="btls">${bottles}</div>
@@ -838,7 +851,7 @@ function mjWater() {
       <p style="font-size:12px">Пляшка Stanley — ${litres(bottle)} л, склянка — ${glass} мл. Пий потроху протягом дня.</p>
       ${log}
     </div>
-    <div class="panel"><h3>Сон минулої ночі</h3>
+    <div class="panel"><h3>Сон ${today === todayStr() ? 'минулої ночі' : 'в ніч перед цим днем'}</h3>
       <div class="opts"><label class="lbl">Заснула<input type="time" data-sin="start" value="${esc(ck.start)}"></label><label class="lbl">Прокинулась<input type="time" data-sin="end" value="${esc(ck.end)}"></label></div>
       <div class="seg">${['Погано', 'Нормально', 'Добре'].map((l, i) => `<button type="button" class="${ck.q === i ? 'on' : ''}" data-a="mjsq" data-v="${i}">${l}</button>`).join('')}</div>
       ${sm != null ? `<p style="font-size:13px">Тривалість: <b>${fmtMins(sm)}</b></p>` : ''}
@@ -855,7 +868,7 @@ const MEASURES = [
 ];
 const n1 = (v) => String(Math.round(v * 10) / 10).replace('.', ',');
 function mjWeight() {
-  const st = S.settings || {}; const rows = S.mj.body.filter((b) => b.weight_kg != null);
+  const bd = mjd(); const ex = S.mj.body.find((b) => b.day === bd) || {}; const st = S.settings || {}; const rows = S.mj.body.filter((b) => b.weight_kg != null);
   const start = Number(st.weight_start || rows[0]?.weight_kg || 0), goal = Number(st.weight_goal || 0);
   let chart = '';
   if (start) {
@@ -881,14 +894,14 @@ function mjWeight() {
   return mjHead('Вага й обʼєми', 'Раз на тиждень, зранку') + `
     <div class="panel"><div class="row" style="color:var(--ink)"><span style="font-size:28px;font-weight:800">${cur ? String(cur).replace('.', ',') : '—'} <span style="font-size:15px;color:var(--muted)">кг</span></span>
       <span style="font-size:12px">${start && cur ? (cur <= start ? '−' : '+') + String(Math.abs(Math.round((start - cur) * 10) / 10)).replace('.', ',') + ' кг від старту' : ''}${goal && cur ? ' · до цілі ' + String(Math.max(0, Math.round((cur - goal) * 10) / 10)).replace('.', ',') : ''}</span></div>${chart}</div>
-    <div class="panel"><h3>Новий запис</h3>
-      <label class="lbl">Вага, кг<input type="number" step="0.1" inputmode="decimal" data-bin="weight_kg" placeholder="напр. 107,4"></label>
+    <div class="panel"><h3>${ex.id ? 'Запис за день' : 'Новий запис'}</h3>${dayBar().replace('class="daybar"', 'class="daybar in"')}
+      <label class="lbl">Вага, кг<input type="number" step="0.1" inputmode="decimal" data-bin="weight_kg" placeholder="напр. 107,4" value="${ex.weight_kg ?? ''}"></label>
       <p style="font-size:12px">Зважуйся в той самий день тижня, зранку, після туалету — так цифри можна порівнювати.</p>
       <details class="meas"><summary>Обʼєми, см · раз на 2–4 тижні</summary>
-        ${MEASURES.map(([f, l, hint]) => `<label class="lbl">${l}<small>${hint}</small><input type="number" step="0.5" inputmode="decimal" data-bin="${f}" placeholder="см"></label>`).join('')}
+        ${MEASURES.map(([f, l, hint]) => `<label class="lbl">${l}<small>${hint}</small><input type="number" step="0.5" inputmode="decimal" data-bin="${f}" placeholder="см" value="${ex[f] ?? ''}"></label>`).join('')}
         <p style="font-size:12px">Міряй зранку, стоячи, розслаблено, на видиху. Сантиметр горизонтально, щільно, але не втискаючи.</p>
       </details>
-      <button class="btn" data-a="mjbody">Зберегти за сьогодні</button></div>
+      <button class="btn" data-a="mjbody">Зберегти · ${esc(dayLabel(bd).toLowerCase())}</button></div>
     ${mrows ? `<div class="panel"><h3>Обʼєми · зміна від першого заміру</h3>${mrows}</div>` : ''}
     ${list ? `<div class="panel"><h3>Історія</h3>${list}</div>` : ''}
     <div class="panel"><h3>Старт і ціль</h3>
@@ -897,25 +910,27 @@ function mjWeight() {
 }
 
 function mjActivity() {
-  const plan = S.settings?.activity_plan || []; const today = todayStr();
-  const rows = weekDays().map((d) => {
+  const plan = S.settings?.activity_plan || []; const today = todayStr(); const off = S.actWeek || 0; const wd = weekDays(off);
+  const rows = wd.map((d) => {
     const dow = parseYmd(d).getDay(); const p = plan.find((x) => x.dow === dow); const on = !!activityOn(d);
     return `<button class="arow ${d === today ? 'today' : ''}" data-a="mjact" data-day="${d}" ${d > today ? 'disabled' : ''}><span class="cb ${on ? 'on' : ''}">${on ? ICON_CHECK : ''}</span><b>${WD[(dow + 6) % 7]}</b><span>${esc(p?.title || '—')}</span></button>`;
   }).join('');
-  return mjHead('Активність', 'Цей тиждень · за самопочуттям') + `
+  const wl = off === 0 ? 'Цей тиждень' : off === -1 ? 'Минулий тиждень' : `${fmtDay(wd[0], { day: 'numeric', month: 'short' })} – ${fmtDay(wd[6], { day: 'numeric', month: 'short' })}`;
+  return mjHead('Активність', 'Відмічай за самопочуттям') + `
+    <div class="daybar"><button class="shx" data-a="mjweek" data-v="-1" aria-label="Попередній тиждень">‹</button><span class="dbl"><b>${esc(wl)}</b><small>${wd.filter((d) => activityOn(d)).length} / 7 днів</small></span><button class="shx" data-a="mjweek" data-v="1" aria-label="Наступний тиждень" ${off >= 0 ? 'disabled' : ''}>›</button></div>
     <div class="panel" style="gap:0">${rows}</div>
     <div class="panel"><h3>Силове вдома · вт, пт</h3>${EXERCISES.map(([a, b]) => `<div class="row" style="color:var(--ink);font-weight:500"><span>${a}</span><b>${b}</b></div>`).join('')}
       <p style="font-size:12px">Болить — не роби через силу, зменш амплітуду.</p></div>`;
 }
 
 function openCheckin(slot) {
-  const today = todayStr(); const c = checkinOf(today, slot);
+  const today = mjd(); const c = checkinOf(today, slot);
   S.ck = { slot, symptoms: new Set(c?.symptoms || []), severity: c?.severity ?? null, appetite: c?.appetite ?? null, energy: c?.energy ?? null, protein: c?.protein ?? null,
     sleep_start: c?.sleep_start?.slice(0, 5) || '', sleep_end: c?.sleep_end?.slice(0, 5) || '', sleep_quality: c?.sleep_quality ?? null, note: c?.note || '' };
   S.view = 'mj'; S.mjSub = 'checkin'; render(); window.scrollTo(0, 0);
 }
 async function quickOk(slot) {
-  const today = todayStr(); const prev = checkinOf(today, slot) || {};
+  const today = S.mjSub === 'checkin' ? mjd() : todayStr(); const prev = checkinOf(today, slot) || {};
   const c = S.ck && S.ck.slot === slot ? S.ck : null;
   const row = { day: today, slot, symptoms: [], severity: 0, appetite: prev.appetite ?? 0, energy: prev.energy ?? 1,
     sleep_start: slot === 'morning' ? (c?.sleep_start || prev.sleep_start || null) : null, sleep_end: slot === 'morning' ? (c?.sleep_end || prev.sleep_end || null) : null,
@@ -923,15 +938,15 @@ async function quickOk(slot) {
   const { data, error } = await sb.from('checkins').upsert(row, { onConflict: 'user_id,day,slot' }).select().single();
   if (error) return toast('Не вдалося зберегти');
   S.mj.checkins = S.mj.checkins.filter((x) => !(x.day === today && x.slot === slot)).concat(data);
-  S.ck = null; if (S.mjSub === 'checkin') S.mjSub = null; render(); toast('Записала: усе добре');
+  S.ck = null; if (S.mjSub === 'checkin') { S.mjSub = null; if (S.mjFrom === 'today') leaveMj(); } render(); toast('Записала: усе добре');
 }
 function mjCheckin() {
-  const today = todayStr(); const c = S.ck; const t = slotTimes();
+  const today = mjd(); const c = S.ck; const t = slotTimes();
   const segq = (field, labels) => `<div class="seg">${labels.map((l, i) => `<button type="button" class="${c[field] === i ? 'on' : ''}" data-a="mjcf" data-f="${field}" data-v="${i}">${l}</button>`).join('')}</div>`;
   const tabs = SLOTS.map((s, i) => { const d = !!checkinOf(today, s.id); return `<button class="slot ${c.slot === s.id ? 'on' : ''} ${d ? 'done' : ''}" data-a="mjcheck" data-v="${s.id}"><b>${s.name}</b><small>${t[i]}${d ? ' · ✓' : ''}</small></button>`; }).join('');
   const none = c.symptoms.size === 0;
   const danger = c.severity === 3 || ((c.symptoms.has('Біль у животі') || c.symptoms.has('Блювання')) && c.severity >= 2);
-  return mjHead('Самопочуття', fmtDay(today, { weekday: 'long', day: 'numeric', month: 'long' })) + `
+  return mjHead('Самопочуття', 'Три короткі відмітки на день') + dayBar() + `
     <div class="slots">${tabs}</div>
     <div style="margin:10px 22px 0"><button class="btn okbtn" data-a="mjok" data-v="${c.slot}" style="width:100%">Все добре — без симптомів</button></div>
     ${c.slot === 'morning' ? `<div class="panel"><h3>Сон</h3><div class="opts"><label class="lbl">Заснула<input type="time" data-cin="sleep_start" value="${esc(c.sleep_start)}"></label><label class="lbl">Прокинулась<input type="time" data-cin="sleep_end" value="${esc(c.sleep_end)}"></label></div>${segq('sleep_quality', ['Погано', 'Нормально', 'Добре'])}</div>` : ''}
@@ -946,6 +961,10 @@ function mjCheckin() {
     <div class="panel"><div class="nrow"><span>Нагадування<small>${t.join(', ')} — на телефон і в Telegram</small></span><button class="sw" role="switch" aria-checked="${!!S.settings?.checkin_reminders}" data-a="mjrem" aria-label="Нагадування про самопочуття"></button></div></div>`;
 }
 
+function leaveMj() {
+  if (S.mjFrom === 'today') S.view = 'today';
+  S.mjSub = null; S.ck = null; S.sleepDraft = null; S.mjDay = null; S.mjFrom = null;
+}
 function mjView() {
   if (!S.mj) return '<div class="boot">Завантаження…</div>';
   if (S.mjSub === 'water') return mjWater();
@@ -958,36 +977,36 @@ function mjView() {
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-a]'); if (!el || !el.dataset.a.startsWith('mj')) return;
   const a = el.dataset.a; const today = todayStr();
-  if (a === 'mjback') { if (S.view === 'settings' || S.view === 'report') S.view = 'meds'; S.mjSub = null; S.sleepDraft = null; render(); window.scrollTo(0, 0); }
-  else if (a === 'mjsub') { S.mjSub = el.dataset.v; S.sleepDraft = null; render(); window.scrollTo(0, 0); }
-  else if (a === 'mjcheck') openCheckin(el.dataset.v);
+  if (a === 'mjback') { if (S.view === 'settings' || S.view === 'report') S.view = 'meds'; leaveMj(); render(); window.scrollTo(0, 0); }
+  else if (a === 'mjsub') { S.mjSub = el.dataset.v; S.sleepDraft = null; S.mjDay = null; S.mjFrom = null; S.actWeek = 0; render(); window.scrollTo(0, 0); }
+  else if (a === 'mjcheck') { if (S.mjSub !== 'checkin') { S.mjDay = null; S.mjFrom = null; } openCheckin(el.dataset.v); }
   else if (a === 'mjok') quickOk(el.dataset.v);
   else if (a === 'mjw') {
-    const ml = Number(el.dataset.v);
-    const { data, error } = await sb.from('water_logs').insert({ day: today, ml }).select().single();
-    if (error && isNetErr(error)) { const row = { day: today, ml }; enqueue({ t: 'water', row }); S.mj.water.push({ ...row, id: 'off-' + Date.now(), created_at: new Date().toISOString() }); render(); return toast(`+${ml} мл · збережу, щойно зʼявиться інтернет`); }
+    const ml = Number(el.dataset.v); const wday = el.dataset.day || mjd();
+    const { data, error } = await sb.from('water_logs').insert({ day: wday, ml }).select().single();
+    if (error && isNetErr(error)) { const row = { day: wday, ml }; enqueue({ t: 'water', row }); S.mj.water.push({ ...row, id: 'off-' + Date.now(), created_at: new Date().toISOString() }); render(); return toast(`+${ml} мл · збережу, щойно зʼявиться інтернет`); }
     if (error) return toast('Не вдалося зберегти');
-    S.mj.water.push(data); render(); toast(`+${ml} мл`, async () => { S.toast = null; renderToast(); await sb.from('water_logs').delete().eq('id', data.id); S.mj.water = S.mj.water.filter((w) => w.id !== data.id); render(); });
+    S.mj.water.push(data); render(); toast(`+${ml} мл${wday !== today ? ' · ' + dayLabel(wday).toLowerCase() : ''}`, async () => { S.toast = null; renderToast(); await sb.from('water_logs').delete().eq('id', data.id); S.mj.water = S.mj.water.filter((w) => w.id !== data.id); render(); });
   }
   else if (a === 'mjwdel') { const id = el.dataset.id; await sb.from('water_logs').delete().eq('id', id); S.mj.water = S.mj.water.filter((w) => w.id !== id); render(); }
   else if (a === 'mjsq') { S.sleepDraft.q = Number(el.dataset.v); render(); }
   else if (a === 'mjsleep') {
-    const d = S.sleepDraft; const prev = checkinOf(today, 'morning');
-    const row = { day: today, slot: 'morning', sleep_start: d.start || null, sleep_end: d.end || null, sleep_quality: d.q, symptoms: prev?.symptoms || [] };
+    const d = S.sleepDraft; const sday = mjd(); const prev = checkinOf(sday, 'morning');
+    const row = { day: sday, slot: 'morning', sleep_start: d.start || null, sleep_end: d.end || null, sleep_quality: d.q, symptoms: prev?.symptoms || [] };
     const { data, error } = await sb.from('checkins').upsert(row, { onConflict: 'user_id,day,slot' }).select().single();
     if (error) return toast('Не вдалося зберегти: ' + error.message);
-    S.mj.checkins = S.mj.checkins.filter((c) => !(c.day === today && c.slot === 'morning')).concat(data); S.sleepDraft = null; render(); toast('Сон збережено');
+    S.mj.checkins = S.mj.checkins.filter((c) => !(c.day === sday && c.slot === 'morning')).concat(data); S.sleepDraft = null; render(); toast('Сон збережено');
   }
   else if (a === 'mjbody') {
     const val = (f) => parseFloat(String(document.querySelector(`[data-bin="${f}"]`)?.value || '').replace(',', '.'));
-    const prev = S.mj.body.find((b) => b.day === today) || {};
-    const row = { day: today }; let any = false;
+    const bday = mjd(); const prev = S.mj.body.find((b) => b.day === bday) || {};
+    const row = { day: bday }; let any = false;
     const w = val('weight_kg'); if (w > 30 && w < 300) { row.weight_kg = w; any = true; } else row.weight_kg = prev.weight_kg ?? null;
     for (const [f] of MEASURES) { const v = val(f); if (v > 10 && v < 250) { row[f] = v; any = true; } else row[f] = prev[f] ?? null; }
     if (!any) return toast('Введи вагу або хоча б один обʼєм');
     const { data, error } = await sb.from('body_logs').upsert(row, { onConflict: 'user_id,day' }).select().single();
     if (error) return toast('Не вдалося зберегти: ' + error.message);
-    S.mj.body = S.mj.body.filter((b) => b.day !== today).concat(data).sort((x, y) => x.day < y.day ? -1 : 1); render(); toast('Збережено');
+    S.mj.body = S.mj.body.filter((b) => b.day !== bday).concat(data).sort((x, y) => x.day < y.day ? -1 : 1); render(); toast('Збережено');
   }
   else if (a === 'mjgoal') {
     const num = (f) => { const v = parseFloat(String(document.querySelector(`[data-gin="${f}"]`)?.value || '').replace(',', '.')); return v > 30 && v < 300 ? Math.round(v * 10) / 10 : null; };
@@ -1005,16 +1024,24 @@ document.addEventListener('click', async (e) => {
   else if (a === 'mjsym') { const v = el.dataset.v; if (!v) S.ck.symptoms.clear(); else if (S.ck.symptoms.has(v)) S.ck.symptoms.delete(v); else S.ck.symptoms.add(v); render(); }
   else if (a === 'mjcf') { const f = el.dataset.f; const v = Number(el.dataset.v); S.ck[f] = S.ck[f] === v ? null : v; render(); }
   else if (a === 'mjcsave') {
-    const c = S.ck;
-    const row = { day: today, slot: c.slot, symptoms: [...c.symptoms], severity: c.severity, appetite: c.appetite, energy: c.energy, protein: c.slot === 'evening' ? c.protein : null,
+    const c = S.ck; const cday = mjd();
+    const row = { day: cday, slot: c.slot, symptoms: [...c.symptoms], severity: c.severity, appetite: c.appetite, energy: c.energy, protein: c.slot === 'evening' ? c.protein : null,
       sleep_start: c.slot === 'morning' ? c.sleep_start || null : null, sleep_end: c.slot === 'morning' ? c.sleep_end || null : null, sleep_quality: c.slot === 'morning' ? c.sleep_quality : null, note: c.note.trim() || null };
     const { data, error } = await sb.from('checkins').upsert(row, { onConflict: 'user_id,day,slot' }).select().single();
     if (error) return toast('Не вдалося зберегти: ' + error.message);
-    S.mj.checkins = S.mj.checkins.filter((x) => !(x.day === today && x.slot === c.slot)).concat(data);
-    S.mjSub = null; S.ck = null; render(); window.scrollTo(0, 0); toast('Самопочуття збережено');
+    S.mj.checkins = S.mj.checkins.filter((x) => !(x.day === cday && x.slot === c.slot)).concat(data);
+    const back = S.mjFrom === 'today'; S.mjSub = null; S.ck = null; if (back) leaveMj(); render(); window.scrollTo(0, 0); toast('Самопочуття збережено');
   }
+  else if (a === 'mjday') setMjDay(shiftDay(mjd(), Number(el.dataset.v)));
+  else if (a === 'mjweek') { S.actWeek = Math.min(0, (S.actWeek || 0) + Number(el.dataset.v)); render(); }
   else if (a === 'mjrem') updateSettings({ checkin_reminders: !S.settings.checkin_reminders });
 });
+function setMjDay(d) {
+  const t = todayStr(); if (!d || d > t) d = t;
+  S.mjDay = d === t ? null : d; S.sleepDraft = null;
+  if (S.mjSub === 'checkin' && S.ck) openCheckin(S.ck.slot); else render();
+}
+document.addEventListener('change', (e) => { if (e.target.dataset && 'mjdate' in e.target.dataset) setMjDay(e.target.value); });
 // дата старту: перемалювати редактор лише після вибору (щоб не закривати календар iOS)
 document.addEventListener('change', (e) => {
   if (e.target.dataset?.ein !== 'start_date' || !S.ed) return;
@@ -1169,7 +1196,7 @@ document.addEventListener('touchend', () => {
 function canGoBack() { return (S.view === 'mj' && S.mjSub) || (S.view === 'today' && S.daySel) || S.view === 'settings' || S.view === 'report'; }
 function goBack() {
   if (S.view === 'settings' || S.view === 'report') S.view = 'meds';
-  else if (S.view === 'mj' && S.mjSub) { S.mjSub = null; S.ck = null; S.sleepDraft = null; }
+  else if (S.view === 'mj' && S.mjSub) leaveMj();
   else if (S.view === 'today' && S.daySel) S.daySel = null;
   render(); window.scrollTo(0, 0);
 }
@@ -1212,7 +1239,7 @@ function render() {
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-a]'); if (!el) return;
   const a = el.dataset.a; const sh = S.sheet;
-  if (a === 'nav') { S.view = el.dataset.v; S.daySel = null; S.mjSub = null; S.ck = null; if (S.view === 'history') { S.sel = null; S.month = null; } render(); window.scrollTo(0, 0); }
+  if (a === 'nav') { S.view = el.dataset.v; S.daySel = null; S.mjSub = null; S.ck = null; S.mjDay = null; S.mjFrom = null; S.actWeek = 0; if (S.view === 'history') { S.sel = null; S.month = null; } render(); window.scrollTo(0, 0); }
   else if (a === 'open') openSheet(el.dataset.id, el.dataset.day, el.dataset.late === '1');
   else if (a === 'lateskip') { const m = S.meds.find((x) => x.id === el.dataset.id); await saveIntake(m, el.dataset.day, { status: 'skipped', taken_at: null, dose: null, site: null, note: 'дозу пропущено' }); toast(`${m.name} — пропуск записано`); }
   else if (a === 'quick') {
@@ -1242,7 +1269,7 @@ document.addEventListener('click', async (e) => {
     if (error) toast('Не вдалося: ' + error.message); else quickDone(`Нагадаю о ${hm(due)}`);
   }
   else if (a === 'theme') { try { localStorage.setItem(THEME_KEY, el.dataset.v); } catch (_) {} applyTheme(); render(); }
-  else if (a === 'gowater') { S.view = 'mj'; S.mjSub = 'water'; render(); window.scrollTo(0, 0); }
+  else if (a === 'gowater' || a === 'gocheck') { const d = el.dataset.day || null; S.mjDay = d && d !== todayStr() ? d : null; S.mjFrom = S.view === 'today' ? 'today' : null; S.view = 'mj'; if (a === 'gocheck') openCheckin(el.dataset.v || 'morning'); else { S.mjSub = 'water'; S.sleepDraft = null; render(); } window.scrollTo(0, 0); }
   else if (a === 'gear') { S.view = 'settings'; render(); window.scrollTo(0, 0); }
   else if (a === 'route') updateSettings({ notify_route: el.dataset.v });
   else if (a === 'eattoggle') updateSettings({ eat_reminder: !S.settings.eat_reminder });
@@ -1360,7 +1387,7 @@ sb.auth.onAuthStateChange((ev, session) => {
   else if (ev === 'INITIAL_SESSION' && !booted) { booted = true; boot(session); }
 });
 
-const APP_VERSION = 22;
+const APP_VERSION = 23;
 // ---- тема: light / dark / auto ----
 const THEME_KEY = 'moi-liky-theme';
 const getTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'light'; } catch (_) { return 'light'; } };
